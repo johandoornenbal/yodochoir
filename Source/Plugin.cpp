@@ -142,7 +142,7 @@ template<class T> void ChoirProcessor::process(juce::AudioBuffer<T>& b,juce::Mid
 void ChoirProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer& m) { process(b,m); }
 void ChoirProcessor::processBlock(juce::AudioBuffer<double>& b,juce::MidiBuffer& m) { process(b,m); }
 bool ChoirProcessor::exportWav(const juce::File& file) {
-    const auto r=rendered(); if(!r || !current()) { message("Render the current settings before exporting."); return false; }
+    const auto r=rendered(); if(!r || r->revision!=sourceRevision.load() || !(r->settings==settings())) { message("Render the current settings before exporting."); return false; }
     juce::TemporaryFile temp(file);
     std::unique_ptr<juce::FileOutputStream> stream(temp.getFile().createOutputStream());
     if(!stream) { message("Cannot create the output file."); return false; }
