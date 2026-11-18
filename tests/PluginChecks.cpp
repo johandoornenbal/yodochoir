@@ -5,6 +5,7 @@
 #include <stdexcept>
 void check(bool ok,const char* why) { if(!ok) throw std::runtime_error(why); }
 void pump() {
+    juce::Timer::callPendingTimersSynchronously();
 #if JUCE_MODAL_LOOPS_PERMITTED
     juce::MessageManager::getInstance()->runDispatchLoopUntil(3);
 #endif
@@ -42,7 +43,7 @@ int main() try {
     check(p.loadTake(inputFile,0),"WAV import failed"); check(p.takes()[0]->mono.size()==24000,"Import changed duration");
     const auto old=p.takes()[0]; check(!p.loadTake(out.getChildFile("missing.wav"),0) && p.takes()[0]==old,"Failed import destroyed a take");
     check(!p.loadTake(inputFile,4),"Invalid slot accepted");
-    std::vector<float> longAudio(48000*31); const auto tooLong=out.getChildFile("too-long.wav"); writeMono(tooLong,longAudio,48000);
+    std::vector<float> longAudio(48000*(choir::maxSeconds+1)); const auto tooLong=out.getChildFile("too-long.wav"); writeMono(tooLong,longAudio,48000);
     check(!p.loadTake(tooLong,0) && p.takes()[0]==old,"Oversize import was accepted or replaced the source"); tooLong.deleteFile();
     p.loadDemo(); p.requestRender(); wait(p); const auto clip=p.rendered(); check(bool(clip),"Missing render");
     // Playback is sample-exact at 48 kHz, and follows MIDI sample offsets.

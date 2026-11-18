@@ -19,16 +19,17 @@ juce::AudioProcessorValueTreeState::ParameterLayout ChoirProcessor::layout() {
     p.add(std::make_unique<juce::AudioParameterInt>(juce::ParameterID{"seed",1},"Variation seed",0,99999,1977));
     p.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{"original",1},"Original first take",false));
     p.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{"loop",1},"Loop preview",false));
+    p.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{"inputMonitor",1},"Monitor routed input",false));
     return p;
 }
-ChoirProcessor::ChoirProcessor():AudioProcessor(BusesProperties().withOutput("Choir",juce::AudioChannelSet::stereo(),true)),
+ChoirProcessor::ChoirProcessor():AudioProcessor(BusesProperties().withInput("Record input",juce::AudioChannelSet::stereo(),true).withOutput("Choir",juce::AudioChannelSet::stereo(),true)),
     Thread("YodoChoir renderer"),state(*this,nullptr,"YodoChoirState",layout()) {
     formats.registerBasicFormats();
     for(size_t i=0;i<ids.size();++i) values[i]=state.getRawParameterValue(ids[i]);
-    original=state.getRawParameterValue("original"); loop=state.getRawParameterValue("loop");
+    original=state.getRawParameterValue("original"); loop=state.getRawParameterValue("loop"); monitor=state.getRawParameterValue("inputMonitor");
     startThread(juce::Thread::Priority::low);
 }
-ChoirProcessor::~ChoirProcessor() { signalThreadShouldExit(); requestSerial.fetch_add(1); notify(); stopThread(-1); }
+ChoirProcessor::~ChoirProcessor() { recording=false; captureSerial.fetch_add(1); signalThreadShouldExit(); requestSerial.fetch_add(1); notify(); stopThread(-1); }
 choir::Settings ChoirProcessor::settings() const {
     return {juce::roundToInt(values[0]->load()),values[1]->load(),values[2]->load(),values[3]->load()*.01f,
             values[4]->load()*.01f,values[5]->load(),juce::roundToInt(values[6]->load())};
@@ -38,12 +39,13 @@ juce::String ChoirProcessor::status() const { const std::lock_guard<std::mutex> 
 std::array<std::shared_ptr<const choir::Take>,4> ChoirProcessor::takes() const { const std::lock_guard<std::mutex> lock(sourceMutex); return sourceBank; }
 void ChoirProcessor::sourcesChanged() { sourceRevision.fetch_add(1); cancelRender(); stop(); }
 bool ChoirProcessor::loadTake(const juce::File& file,int slot) {
+    if(captureActive()) { message("Finish or cancel recording before changing source takes."); return false; }
     if(slot<0 || slot>=4) return false;
     std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(file));
     if(!reader) { message("Cannot read this file. Use WAV, AIFF or FLAC."); return false; }
     if(reader->numChannels<1 || reader->numChannels>2 || !std::isfinite(reader->sampleRate) || reader->sampleRate<8000 || reader->sampleRate>192000
        || reader->lengthInSamples<2 || double(reader->lengthInSamples)/reader->sampleRate>choir::maxSeconds) {
-        message("Use a mono/stereo take up to 30 seconds, at 8-192 kHz."); return false;
+        message("Use a mono/stereo take up to 120 seconds, at 8-192 kHz."); return false;
     }
     try {
         juce::AudioBuffer<float> buffer(static_cast<int>(reader->numChannels),static_cast<int>(reader->lengthInSamples));
@@ -60,23 +62,113 @@ bool ChoirProcessor::loadTake(const juce::File& file,int slot) {
     } catch(const std::exception& e) { message(juce::String("Import failed: ")+e.what()); return false; }
 }
 void ChoirProcessor::clearTake(int slot) {
+    if(captureActive()) return;
     if(slot<0 || slot>=4) return;
     { const std::lock_guard<std::mutex> lock(sourceMutex); sourceBank[static_cast<size_t>(slot)].reset(); sourcesChanged(); }
     message("Take cleared. Render again to update the choir.");
 }
 void ChoirProcessor::loadDemo() {
+    if(captureActive()) return;
     auto a=choir::demo(0),b=choir::demo(1);
     { const std::lock_guard<std::mutex> lock(sourceMutex); sourceBank={a,b,nullptr,nullptr}; sourcesChanged(); }
     message("Synthetic vowel demo loaded. Render choir to hear the ensemble.");
 }
 void ChoirProcessor::requestRender() {
+    if(captureActive()) { message("Finish or cancel recording before rendering the choir."); return; }
     const auto bank=takes(); if(std::none_of(bank.begin(),bank.end(),[](const auto& t){return bool(t);})) { message("Load at least one vocal take first."); return; }
     stop(); queuedSerial=requestSerial.fetch_add(1)+1; pending=true; message("Queued for rendering..."); notify();
 }
 void ChoirProcessor::cancelRender() { requestSerial.fetch_add(1); pending=false; message("Render cancelled."); }
+bool ChoirProcessor::startRecording(int slot) {
+    if(slot<0 || slot>=4) return false;
+    if(captureActive()) { message("Finish the current recording first."); return false; }
+    const double rate=hostRate.load();
+    if(getTotalNumInputChannels()<1) { message("Enable the plugin's mono or stereo input bus to record Reaper sends."); return false; }
+    if(!std::isfinite(rate) || rate<8000 || rate>192000) { message("Record at a host sample rate between 8 and 192 kHz."); return false; }
+    try {
+        auto ready=std::make_unique<Capture>();
+        ready->mono.resize(static_cast<size_t>(std::llround(rate*choir::maxSeconds)),0.f);
+        ready->rate=rate; ready->slot=slot;
+        bool accepted=false;
+        {
+            const juce::SpinLock::ScopedLockType lock(captureLock);
+            if(!capture && !captureBusy.load() && !recording.load()) {
+                ready->serial=captureSerial.fetch_add(1)+1;
+                capture=std::move(ready); captureSeconds=0; captureSlot=slot;
+                captureInterrupted=false; captureAtLimit=false; inputPeaks[0]=0; inputPeaks[1]=0; accepted=true;
+            }
+        }
+        if(!accepted) { message("The previous recording is still being prepared."); return false; }
+        stop(); cancelRender(); recording=true;
+        message("Recording routed input into take "+juce::String(slot+1)+" (maximum 2:00).");
+        return true;
+    } catch(const std::exception&) { message("Not enough memory to start a two-minute recording. Previous take preserved."); return false; }
+}
+void ChoirProcessor::finishRecording() {
+    if(recording.exchange(false)) { captureBusy=true; capturePending=true; }
+    // The worker polls this flag; this path is safe to call from the audio callback.
+}
+void ChoirProcessor::cancelRecording() {
+    captureSerial.fetch_add(1);
+    if(recording.exchange(false)) { captureBusy=true; capturePending=true; }
+    message("Recording cancelled. Previous take preserved.");
+}
+template<class T> void ChoirProcessor::captureInput(const juce::AudioBuffer<T>& b) {
+    if(!recording.load()) return;
+    const juce::SpinLock::ScopedTryLockType lock(captureLock);
+    if(!lock.isLocked()) { if(recording.load()) { captureInterrupted=true; finishRecording(); } return; }
+    if(!recording.load() || !capture) return;
+    if(capture->rate!=hostRate.load() || capture->serial!=captureSerial.load()) { finishRecording(); return; }
+    const int channels=std::min(getTotalNumInputChannels(),b.getNumChannels());
+    if(channels<1) { captureInterrupted=true; finishRecording(); return; }
+    const size_t count=std::min(static_cast<size_t>(b.getNumSamples()),capture->mono.size()-capture->frames);
+    std::array<float,2> peak{};
+    for(size_t i=0;i<count;++i) {
+        double sum=0;
+        for(int c=0;c<channels;++c) {
+            const double sample=static_cast<double>(b.getSample(c,static_cast<int>(i)));
+            const float value=std::isfinite(sample)?static_cast<float>(std::clamp(sample,-32.,32.)):0.f;
+            sum+=value; peak[static_cast<size_t>(std::min(c,1))]=std::max(peak[static_cast<size_t>(std::min(c,1))],std::abs(value));
+        }
+        capture->mono[capture->frames+i]=static_cast<float>(sum/channels);
+    }
+    if(channels==1) peak[1]=peak[0];
+    for(size_t c=0;c<2;++c) { auto old=inputPeaks[c].load(); while(old<peak[c] && !inputPeaks[c].compare_exchange_weak(old,peak[c])) {} }
+    capture->frames+=count; captureSeconds=double(capture->frames)/capture->rate;
+    if(capture->frames==capture->mono.size()) { captureAtLimit=true; finishRecording(); }
+}
+void ChoirProcessor::finalizeCapture() {
+    std::unique_ptr<Capture> completed;
+    { const juce::SpinLock::ScopedLockType lock(captureLock); completed=std::move(capture); }
+    if(completed && completed->serial==captureSerial.load() && !threadShouldExit()) {
+        try {
+            if(captureInterrupted.load()) message("Input recording was interrupted. Previous take preserved.");
+            else if(completed->frames<2) message("No input samples were received. Start Reaper playback and record again. Previous take preserved.");
+            else {
+                completed->mono.resize(completed->frames);
+                auto take=std::make_shared<choir::Take>();
+                take->name="Recorded take "+std::to_string(completed->slot+1);
+                take->mono=choir::resample(completed->mono,completed->rate);
+                take->preview=choir::waveform(take->mono);
+                bool committed=false;
+                {
+                    const std::lock_guard<std::mutex> lock(sourceMutex);
+                    if(completed->serial==captureSerial.load() && !threadShouldExit()) {
+                        sourceBank[static_cast<size_t>(completed->slot)]=std::move(take); sourcesChanged(); committed=true;
+                    }
+                }
+                if(committed) message((captureAtLimit.load()?"Two-minute limit reached. ":juce::String{})+"Recorded take "+juce::String(completed->slot+1)+" saved. Render choir when ready.");
+            }
+        } catch(const std::exception& e) { message(juce::String("Recording could not be prepared. Previous take preserved: ")+e.what()); }
+    }
+    captureSlot=-1;
+    captureBusy=false;
+}
+
 void ChoirProcessor::run() {
     while(!threadShouldExit()) {
-        if(!pending.exchange(false)) { wait(100); continue; }
+        if(capturePending.exchange(false)) { finalizeCapture(); continue; }
+        if(!pending.exchange(false)) { wait(25); continue; }
         const auto serial=queuedSerial.load(); const auto config=settings();
         uint64_t revision=0; std::array<std::shared_ptr<const choir::Take>,4> bank;
         { const std::lock_guard<std::mutex> lock(sourceMutex); bank=sourceBank; revision=sourceRevision.load(); }
@@ -98,16 +190,29 @@ void ChoirProcessor::run() {
 }
 std::shared_ptr<const choir::Render> ChoirProcessor::rendered() const { const juce::SpinLock::ScopedLockType lock(renderLock); return clip; }
 bool ChoirProcessor::current() const { const auto r=rendered(); return r && r->revision==sourceRevision.load() && r->settings==settings(); }
-void ChoirProcessor::play() { if(current()) { rewind=true; playing=true; } else message("Render choir with the current takes and settings first."); }
+void ChoirProcessor::play() { if(captureActive()) { message("Finish or cancel recording before previewing the choir."); return; } if(current()) { rewind=true; playing=true; } else message("Render choir with the current takes and settings first."); }
 void ChoirProcessor::stop() { playing=false; rewind=true; position=0; }
-void ChoirProcessor::prepareToPlay(double rate,int) { hostRate=rate>0?rate:48000.; stop(); peaks[0]=0; peaks[1]=0; }
+void ChoirProcessor::prepareToPlay(double rate,int) {
+    finishRecording(); hostRate=std::isfinite(rate) && rate>0?rate:48000.; stop(); peaks[0]=0; peaks[1]=0;
+}
 template<class T> void ChoirProcessor::process(juce::AudioBuffer<T>& b,juce::MidiBuffer& midi) {
-    juce::ScopedNoDenormals guard; b.clear();
+    juce::ScopedNoDenormals guard;
+    captureInput(b); // Read the Reaper sends before clearing/replacing any output.
+    const int inputs=getTotalNumInputChannels();
+    if(monitor->load()<.5f || inputs==0) b.clear();
+    else if(inputs==1 && b.getNumChannels()>1) b.copyFrom(1,0,b,0,0,b.getNumSamples());
+    if(monitor->load()>.5f && inputs>0 && !playing.load()) {
+        for(size_t c=0;c<2 && c<static_cast<size_t>(b.getNumChannels());++c) {
+            const float peak=static_cast<float>(b.getMagnitude(static_cast<int>(c),0,b.getNumSamples()));
+            auto old=peaks[c].load(); while(old<peak && !peaks[c].compare_exchange_weak(old,peak)) {}
+        }
+    }
+    if(captureActive()) { playing=false; midi.clear(); return; }
     const juce::SpinLock::ScopedTryLockType lock(renderLock);
     if(!lock.isLocked() || !clip || b.getNumChannels()<2) { midi.clear(); return; }
     if(clip->revision!=sourceRevision.load() || !(clip->settings==settings())) { playing=false; midi.clear(); return; }
     if(rewind.exchange(false)) cursor=0;
-    const auto count=clip->left.size(); const double step=choir::sampleRate/hostRate;
+    const auto count=clip->left.size(); const double step=choir::sampleRate/hostRate.load();
     std::array<float,2> peak{};
     const auto renderSegment=[&](int start,int end) {
         for(int i=start;i<end;++i) {
@@ -142,6 +247,7 @@ template<class T> void ChoirProcessor::process(juce::AudioBuffer<T>& b,juce::Mid
 void ChoirProcessor::processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer& m) { process(b,m); }
 void ChoirProcessor::processBlock(juce::AudioBuffer<double>& b,juce::MidiBuffer& m) { process(b,m); }
 bool ChoirProcessor::exportWav(const juce::File& file) {
+    if(captureActive()) { message("Finish recording before exporting the choir."); return false; }
     const auto r=rendered(); if(!r || r->revision!=sourceRevision.load() || !(r->settings==settings())) { message("Render the current settings before exporting."); return false; }
     juce::TemporaryFile temp(file);
     std::unique_ptr<juce::FileOutputStream> stream(temp.getFile().createOutputStream());
@@ -168,7 +274,7 @@ void ChoirProcessor::getStateInformation(juce::MemoryBlock& data) {
     juce::MemoryOutputStream out(data,false); saved.writeToStream(out);
 }
 void ChoirProcessor::setStateInformation(const void* bytes,int size) {
-    if(!bytes || size<=0 || size>32*1024*1024) return;
+    if(!bytes || size<=0 || size>128*1024*1024) return;
     auto saved=juce::ValueTree::readFromData(bytes,static_cast<size_t>(size));
     if(!saved.isValid() || !saved.hasType("YodoChoirState") || static_cast<int>(saved.getProperty("schema",0))!=1) return;
     std::array<std::shared_ptr<const choir::Take>,4> bank{};
@@ -187,7 +293,12 @@ void ChoirProcessor::setStateInformation(const void* bytes,int size) {
     for(auto* raw:getParameters()) if(auto* p=dynamic_cast<juce::RangedAudioParameter*>(raw)) {
         const auto child=saved.getChildWithProperty("id",p->paramID);
         if(child.isValid() && !std::isfinite(static_cast<float>(child.getProperty("value")))) return;
+        if(!child.isValid()) {
+            juce::ValueTree missing{"PARAM"}; missing.setProperty("id",p->paramID,nullptr);
+            missing.setProperty("value",p->convertFrom0to1(p->getDefaultValue()),nullptr); saved.appendChild(missing,nullptr);
+        }
     }
+    cancelRecording();
     state.replaceState(saved); uiSize=juce::jlimit(1,3,static_cast<int>(saved.getProperty("uiSize",2)));
     { const std::lock_guard<std::mutex> lock(sourceMutex); sourceBank=std::move(bank); sourcesChanged(); }
     message("Session takes restored. Rebuilding choir..."); requestRender();
@@ -198,8 +309,13 @@ public:
     explicit ChoirPanel(ChoirProcessor& p):processor(p) {
         setLookAndFeel(&look);
         for(size_t i=0;i<4;++i) {
-            addAndMakeVisible(load[i]); addAndMakeVisible(clear[i]);
+            addAndMakeVisible(load[i]); addAndMakeVisible(clear[i]); addAndMakeVisible(recordButtons[i]);
             load[i].setComponentID("load"+juce::String(static_cast<int>(i))); clear[i].setComponentID("clear"+juce::String(static_cast<int>(i)));
+            recordButtons[i].setComponentID("record"+juce::String(static_cast<int>(i)));
+            recordButtons[i].setButtonText("REC"); recordButtons[i].setColour(juce::TextButton::buttonColourId,juce::Colour(0xff6b3430));
+            recordButtons[i].setColour(juce::TextButton::textColourOffId,style::cream);
+            recordButtons[i].setTooltip("Record routed input into this slot, up to two minutes. Stop commits the recording; Cancel capture keeps the previous take.");
+            recordButtons[i].onClick=[this,i] { if(processor.isRecording()) processor.finishRecording(); else processor.startRecording(static_cast<int>(i)); refresh(); };
             load[i].onClick=[this,i]{chooseTake(static_cast<int>(i));};
             clear[i].setButtonText("x"); clear[i].onClick=[this,i]{processor.clearTake(static_cast<int>(i));};
         }
@@ -219,7 +335,7 @@ public:
         knobs[3].setTooltip("Stereo placement of the singers. 0% centres the dry ensemble; Room can add stereo reflections.");
         knobs[4].setTooltip("Simple stereo room on the rendered ensemble. 0% removes room and its tail.");
         knobs[5].setTooltip("Output gain baked into the next render and exported WAV. Re-render after changing.");
-        for(auto* button:{&renderButton,&preview,&stopButton,&ab,&exportButton,&demoButton,&variation,&reset,&loopButton}) {
+        for(auto* button:{&renderButton,&preview,&stopButton,&ab,&exportButton,&demoButton,&variation,&reset,&loopButton,&monitorButton,&cancelCaptureButton}) {
             addAndMakeVisible(*button); button->setColour(juce::TextButton::buttonColourId,style::ink);
             button->setColour(juce::TextButton::textColourOffId,style::gold);
             button->setColour(juce::TextButton::buttonOnColourId,style::gold); button->setColour(juce::TextButton::textColourOnId,style::ink);
@@ -228,11 +344,16 @@ public:
         renderButton.setComponentID("render"); preview.setComponentID("preview"); stopButton.setComponentID("stop");
         ab.setComponentID("original"); exportButton.setComponentID("export"); demoButton.setComponentID("demo"); variation.setComponentID("variation"); reset.setComponentID("reset"); loopButton.setComponentID("loop");
         renderButton.onClick=[this]{if(processor.busy.load()) processor.cancelRender(); else processor.requestRender();};
-        preview.onClick=[this]{processor.play();}; stopButton.onClick=[this]{processor.stop();};
+        preview.onClick=[this]{processor.play();}; stopButton.onClick=[this]{processor.stop();processor.finishRecording();};
         demoButton.onClick=[this]{processor.loadDemo();}; exportButton.onClick=[this]{chooseExport();};
         variation.onClick=[this]{auto* parameter=processor.state.getParameter("seed");
             const auto value=std::fmod(processor.settings().seed+1.,100000.); parameter->beginChangeGesture(); parameter->setValueNotifyingHost(parameter->convertTo0to1(static_cast<float>(value))); parameter->endChangeGesture(); processor.requestRender();};
         reset.onClick=[this]{for(size_t i=0;i<ids.size();++i) { auto* parameter=processor.state.getParameter(ids[i]); parameter->beginChangeGesture(); parameter->setValueNotifyingHost(parameter->getDefaultValue()); parameter->endChangeGesture(); }};
+        monitorButton.setComponentID("inputMonitor"); cancelCaptureButton.setComponentID("cancelCapture");
+        monitorButton.setClickingTogglesState(true);
+        monitorAttachment=std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(processor.state,"inputMonitor",monitorButton);
+        monitorButton.setTooltip("Hear routed input when choir preview is stopped. Off by default. Preview replaces input monitoring.");
+        cancelCaptureButton.onClick=[this] {processor.cancelRecording();refresh();};
         ab.setClickingTogglesState(true); loopButton.setClickingTogglesState(true);
         abAttachment=std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(processor.state,"original",ab);
         loopAttachment=std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(processor.state,"loop",loopButton);
@@ -260,8 +381,8 @@ public:
     }
     void resized() override {
         sizeChoice.setBounds(864,15,190,27); reset.setBounds(864,56,190,29);
-        demoButton.setBounds(423,128,143,26);
-        for(int i=0;i<4;++i) { load[static_cast<size_t>(i)].setBounds(46,164+i*45,473,36); clear[static_cast<size_t>(i)].setBounds(525,164+i*45,40,36); }
+        demoButton.setBounds(423,128,143,26); cancelCaptureButton.setBounds(250,128,160,26); monitorButton.setBounds(602,320,190,26);
+        for(int i=0;i<4;++i) { load[static_cast<size_t>(i)].setBounds(46,164+i*45,404,36); recordButtons[static_cast<size_t>(i)].setBounds(458,164+i*45,60,36); clear[static_cast<size_t>(i)].setBounds(525,164+i*45,40,36); }
         leftMeter.setBounds(602,151,208,164); rightMeter.setBounds(828,151,208,164);
         for(int i=0;i<6;++i) knobs[static_cast<size_t>(i)].setBounds(39+i*171,526,165,132);
         renderButton.setBounds(46,687,192,36); preview.setBounds(250,687,125,36); stopButton.setBounds(387,687,100,36);
@@ -273,26 +394,32 @@ public:
         g.fillAll(cream); g.setColour(ink); g.setFont(juce::FontOptions(11.f));
         g.drawText("YODO AUDIO    /    PHRASE ENSEMBLE",32,15,650,22,juce::Justification::left);
         g.setFont(juce::FontOptions(40.f)); g.drawText("YodoChoir",30,42,300,55,juce::Justification::left);
-        g.setFont(juce::FontOptions(12.f)); g.drawText("S T U D I O   /   P R O T O T Y P E  0 1",290,68,500,20,juce::Justification::left);
+        g.setFont(juce::FontOptions(12.f)); g.drawText("S T U D I O   /   P R O T O T Y P E  0 2",290,68,500,20,juce::Justification::left);
         g.setGradientFill(juce::ColourGradient(juce::Colour(0xff343d36),0,108,juce::Colour(0xff19221d),0,780,false));
         g.fillRoundedRectangle(16,108,1068,674,16); g.setColour(gold.withAlpha(.25f)); g.drawRoundedRectangle({17.f,109.f,1066.f,672.f},15,1);
         for(float x:{30.f,1070.f}) for(float y:{122.f,768.f}) {g.setColour(ink.darker());g.fillEllipse(x-4,y-4,8,8);g.setColour(muted);g.drawLine(x-2,y+1,x+2,y-1,1);}
         g.setColour(gold); g.setFont(juce::FontOptions(12.f)); g.drawText("01 / SOURCE TAKES",46,128,330,25,juce::Justification::left);
-        g.drawText("02 / STEREO ENSEMBLE",602,122,434,25,juce::Justification::centred);
+        g.drawText(processor.captureActive()?"02 / RECORD INPUT":"02 / STEREO ENSEMBLE",602,122,434,25,juce::Justification::centred);
         g.setColour(cream.withAlpha(.55f)); g.setFont(juce::FontOptions(11.f));
-        g.drawText("WAV / AIFF / FLAC  /  DROP FILES HERE  /  30 s PER TAKE",46,348,530,22,juce::Justification::left);
+        g.drawText("WAV / AIFF / FLAC  /  DROP FILES HERE  /  120 s PER TAKE",46,348,530,22,juce::Justification::left);
         const auto r=processor.rendered();
-        g.drawText(r?juce::String(r->settings.singers)+" SINGERS  /  48 kHz  /  PEAK TRIM "+juce::String(r->peakTrimDb,1)+" dB":"LOCAL RENDERING  /  NO VOICE MODEL REQUIRED",602,333,434,32,juce::Justification::centred);
+        g.drawText(processor.captureActive()?juce::String("HOST INPUT / MONO TAKE / 120 s MAX"):r?juce::String(r->settings.singers)+" SINGERS  /  48 kHz  /  PEAK TRIM "+juce::String(r->peakTrimDb,1)+" dB":"LOCAL RENDERING  /  NO VOICE MODEL REQUIRED",602,347,434,26,juce::Justification::centred);
         g.setColour(juce::Colour(0xff111b16)); g.fillRoundedRectangle(46,385,990,83,7);
         g.setColour(gold.withAlpha(.12f)); g.drawHorizontalLine(426,55,1027);
         choir::Waveform wave{};
-        if(r) wave=ab.getToggleState()?r->dryWave:r->wetWave;
+        if(processor.captureActive()) wave={};
+        else if(r) wave=ab.getToggleState()?r->dryWave:r->wetWave;
         else { const auto bank=processor.takes(); for(const auto& take:bank) if(take) {wave=take->preview;break;} }
         const float wavePeak=*std::max_element(wave.begin(),wave.end());
         const float waveScale=wavePeak>0?31.f/wavePeak:0.f; // Display normalization only.
         for(size_t i=0;i<wave.size();++i) {
             const float x=53.f+static_cast<float>(i)*976.f/256.f,h=std::min(33.f,wave[i]*waveScale);
             g.setColour(gold.withAlpha(.7f)); g.drawVerticalLine(juce::roundToInt(x),426-h,426+h);
+        }
+        if(processor.captureActive()) {
+            g.setColour(gold); g.setFont(juce::FontOptions(15.f));
+            g.drawText((processor.isRecording()?"RECORDING INPUT / ":"PREPARING TAKE / ")+juce::String(processor.recordingSeconds(),1)+" s",60,404,960,36,juce::Justification::centred);
+            g.setColour(juce::Colour(0xffb36557)); g.fillRect(53.f,461.f,976.f*static_cast<float>(processor.recordingSeconds()/choir::maxSeconds),3.f);
         }
         if(processor.isPlaying()) {g.setColour(cream);const float x=53+processor.playbackPosition()*976;g.drawLine(x,391,x,461,1.5f);}
         g.setFont(juce::FontOptions(10.f));g.setColour(cream.withAlpha(.55f));
@@ -307,7 +434,7 @@ public:
     }
 private:
     void chooseTake(int slot) {
-        chooser=std::make_unique<juce::FileChooser>("Choose a vocal take (up to 30 seconds)",juce::File{},"*.wav;*.aif;*.aiff;*.flac");
+        chooser=std::make_unique<juce::FileChooser>("Choose a vocal take (up to 120 seconds)",juce::File{},"*.wav;*.aif;*.aiff;*.flac");
         chooser->launchAsync(juce::FileBrowserComponent::openMode|juce::FileBrowserComponent::canSelectFiles,
             [safe=juce::Component::SafePointer<ChoirPanel>(this),slot](const juce::FileChooser& fc){if(safe && fc.getResult().existsAsFile()){safe->processor.loadTake(fc.getResult(),slot);safe->refresh();}});
     }
@@ -329,28 +456,36 @@ private:
         const auto bank=processor.takes();
         for(size_t i=0;i<4;++i) {
             const auto label=bank[i]?juce::String(bank[i]->name)+"  /  "+juce::String(double(bank[i]->mono.size())/choir::sampleRate,1)+" s":"Load vocal take "+juce::String(static_cast<int>(i+1))+"...";
-            load[i].setButtonText(label); clear[i].setEnabled(bool(bank[i]));
+            const bool capturing=processor.captureActive(),activeSlot=processor.recordingSlot()==static_cast<int>(i);
+            const auto seconds=static_cast<int>(processor.recordingSeconds());
+            load[i].setButtonText(capturing && activeSlot?(processor.isRecording()?"Recording ":"Saving recording ")+juce::String(seconds/60)+":"+juce::String(seconds%60).paddedLeft('0',2)+" / 2:00":label);
+            load[i].setEnabled(!capturing); clear[i].setEnabled(bool(bank[i]) && !capturing);
+            recordButtons[i].setButtonText(capturing && activeSlot && processor.isRecording()?"STOP":"REC");
+            recordButtons[i].setEnabled(!capturing || (activeSlot && processor.isRecording()));
         }
         const bool ready=processor.current(),working=processor.busy.load();
-        preview.setEnabled(ready && !working); exportButton.setEnabled(ready && !working);
+        const bool capturing=processor.captureActive();
+        preview.setEnabled(ready && !working && !capturing); exportButton.setEnabled(ready && !working && !capturing);
+        renderButton.setEnabled(!capturing); variation.setEnabled(!capturing); demoButton.setEnabled(!capturing);
+        cancelCaptureButton.setEnabled(capturing);
         renderButton.setButtonText(working?"Cancel render":"RENDER CHOIR");
         ab.setButtonText(ab.getToggleState()?"A: Original take":"B: Choir");
         const auto r=processor.rendered();
-        statusLabel.setText(!working && r && !ready?"Takes or settings changed. Render choir again before preview or export.":processor.status(),juce::dontSendNotification);
+        statusLabel.setText(capturing?(processor.isRecording()?"Recording routed input. Press STOP to keep it, or Cancel capture to keep the previous take.":"Preparing the recorded take..."):!working && r && !ready?"Takes or settings changed. Render choir again before preview or export.":processor.status(),juce::dontSendNotification);
         if(sizeChoice.getSelectedId()!=processor.uiSize.load()) {sizeChoice.setSelectedId(processor.uiSize.load(),juce::dontSendNotification);if(sizeChanged)sizeChanged();}
     }
     void timerCallback() override {
         refresh();
-        for(size_t c=0;c<2;++c) {const float peak=processor.peaks[c].exchange(0);meterLevels[c]=std::max(peak,meterLevels[c]*.84f);}
+        for(size_t c=0;c<2;++c) {const float peak=processor.captureActive()?processor.inputPeaks[c].exchange(0):processor.peaks[c].exchange(0);meterLevels[c]=std::max(peak,meterLevels[c]*.84f);}
         leftMeter.setPeak(meterLevels[0]);rightMeter.setPeak(meterLevels[1]); repaint();
     }
     ChoirProcessor& processor;
     style::Look look;
-    std::array<juce::TextButton,4> load,clear;
+    std::array<juce::TextButton,4> load,clear,recordButtons;
     std::array<juce::Slider,6> knobs;
     std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>,6> attachments;
-    juce::TextButton renderButton{"RENDER CHOIR"},preview{"Preview"},stopButton{"Stop"},ab{"B: Choir"},exportButton{"Export WAV..."},demoButton{"Load demo"},variation{"New variation"},reset{"RESET SETTINGS"},loopButton{"Loop preview"};
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> abAttachment,loopAttachment;
+    juce::TextButton renderButton{"RENDER CHOIR"},preview{"Preview"},stopButton{"Stop"},ab{"B: Choir"},exportButton{"Export WAV..."},demoButton{"Load demo"},variation{"New variation"},reset{"RESET SETTINGS"},loopButton{"Loop preview"},monitorButton{"Monitor input"},cancelCaptureButton{"Cancel capture"};
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> abAttachment,loopAttachment,monitorAttachment;
     juce::ComboBox sizeChoice;
     juce::Label statusLabel;
     OutputMeter leftMeter{"LEFT"},rightMeter{"RIGHT"};

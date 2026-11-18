@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 namespace choir {
-constexpr int sampleRate=48000, slots=4, maxSeconds=30;
+constexpr int sampleRate=48000, slots=4, maxSeconds=120;
 using Waveform=std::array<float,256>;
 struct Take {
     std::string name;

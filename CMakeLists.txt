@@ -6,7 +6,7 @@ if(CMAKE_HOST_APPLE)
   endif()
   set(CMAKE_OSX_DEPLOYMENT_TARGET 11.0 CACHE STRING "Minimum macOS version")
 endif()
-project(YodoChoir VERSION 0.1.0 LANGUAGES C CXX)
+project(YodoChoir VERSION 0.2.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(CTest)
@@ -34,9 +34,9 @@ juce_add_plugin(YodoChoir
   COMPANY_NAME "Yodo Audio" BUNDLE_ID "nl.doornenbal.yodochoir"
   PLUGIN_MANUFACTURER_CODE Jdau PLUGIN_CODE Ychr
   FORMATS VST3 PRODUCT_NAME "YodoChoir"
-  IS_SYNTH TRUE NEEDS_MIDI_INPUT TRUE NEEDS_MIDI_OUTPUT FALSE
+  IS_SYNTH FALSE NEEDS_MIDI_INPUT TRUE NEEDS_MIDI_OUTPUT FALSE
   IS_MIDI_EFFECT FALSE EDITOR_WANTS_KEYBOARD_FOCUS FALSE
-  COPY_PLUGIN_AFTER_BUILD FALSE VST3_CATEGORIES Instrument Generator)
+  COPY_PLUGIN_AFTER_BUILD FALSE VST3_CATEGORIES Fx Tools)
 juce_generate_juce_header(YodoChoir)
 target_sources(YodoChoir PRIVATE Source/Plugin.cpp)
 target_compile_definitions(YodoChoir PUBLIC JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
@@ -48,5 +48,10 @@ if(BUILD_TESTING)
   target_compile_definitions(plugin_checks PRIVATE JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1)
   target_link_libraries(plugin_checks PRIVATE YodoChoir)
   add_test(NAME plugin_workflow COMMAND plugin_checks)
+  add_executable(recording_checks tests/RecordingChecks.cpp)
+  target_include_directories(recording_checks PRIVATE "${JUCE_MODULES_DIR}")
+  target_compile_definitions(recording_checks PRIVATE JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1)
+  target_link_libraries(recording_checks PRIVATE YodoChoir)
+  add_test(NAME track_recording COMMAND recording_checks)
   add_test(NAME installer_script COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/InstallerChecks.sh")
 endif()

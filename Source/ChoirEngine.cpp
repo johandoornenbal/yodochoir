@@ -39,7 +39,7 @@ Waveform waveform(const std::vector<float>& data) {
 }
 std::vector<float> resample(const std::vector<float>& in,double rate) {
     if(in.empty() || !std::isfinite(rate) || rate<8000 || rate>192000) throw std::invalid_argument("Unsupported audio sample rate");
-    if(double(in.size())/rate>maxSeconds+.001) throw std::invalid_argument("Each take must be 30 seconds or shorter");
+    if(double(in.size())/rate>maxSeconds+.001) throw std::invalid_argument("Each take must be 120 seconds or shorter");
     if(rate==sampleRate) return in;
     const size_t length=static_cast<size_t>(std::llround(double(in.size())*sampleRate/rate));
     std::vector<float> out(length);

@@ -1,7 +1,7 @@
-# YodoChoir — first prototype
+# YodoChoir — phrase ensemble and track recorder
 
 Turn a few vocal takes into a stereo ensemble, entirely on your computer.
-Import up to four recordings of the **same phrase**, render 4–32 virtual singers,
+Import or record up to four takes of the **same phrase**, render 4–32 virtual singers,
 audition the result and export a WAV to your DAW. The interface and Apple Silicon
 install workflow follow [ToTape Studio](https://github.com/johandoornenbal/tape).
 
@@ -16,7 +16,7 @@ identities, translate lyrics or reproduce the trained choir models of
 ## Try it
 
 1. Load one to four mono or stereo WAV, AIFF or FLAC vocal takes, or drag files
-   onto empty slots. Each can be up to **30 seconds**, at 8–192 kHz. Stereo sources
+   onto empty slots. Each can be up to **two minutes (120 seconds)**, at 8–192 kHz. Stereo sources
    are summed to mono; imports are resampled to a canonical 48 kHz.
 2. Start with dry recordings of the same phrase, aligned at their starts. Different
    performances of the same phrase generally give more variety than one duplicated
@@ -39,15 +39,79 @@ new pitch/onset offsets. **Reset settings** restores the six render controls and
 seed without clearing recordings. The small `x` beside each take clears that slot;
 click a loaded take to replace it. Drag/drop fills empty slots in order.
 
-## DAW use
+## Recording from other tracks in Reaper
 
-YodoChoir is a **VST3 instrument/generator** with stereo output. Load it on an
-instrument track. Preview requires active DAW audio callbacks; depending on your
-host, enable monitoring or start the transport. It does not process incoming track
-audio or record a microphone. Import your recorded files instead.
+YodoChoir now has a **stereo audio input** and is listed as a VST3 audio effect
+(with MIDI trigger support). Insert it as an ordinary track FX on a track called,
+for example, “Choir capture”. After updating, restart/rescan Reaper if it still
+shows the older input-free instrument version. The plugin identity is unchanged;
+old no-input instances still work for imported samples and preview. Enable the
+plugin's input bus/pins if an old instance reports that no input is available.
+
+1. On a vocal source track, add an **audio send** to the Choir capture track.
+   Route source channels **1/2 → destination channels 1/2**. No MIDI send is
+   required to record audio. Use a normal post-fader send with its level/fader set
+   appropriately; source-track FX and send settings determine what reaches the input.
+2. Press **REC** beside the desired take slot in YodoChoir, then play the phrase
+   in Reaper. The plugin records the samples arriving at its input. The two
+   analogue meters show incoming level while recording.
+3. Press that slot's **STOP**, or the main **Stop** button. The take is prepared
+   in the background and replaces that slot only when preparation succeeds.
+   Recording automatically stops and keeps the take at **2:00**.
+4. For another take, route/solo the next vocal source and record another slot.
+   All sends arriving on input 1/2 are mixed together by Reaper; YodoChoir captures
+   that mix into one take. Record one intended performance at a time for separate
+   singers, and start takes at matching positions in the phrase.
+5. Press **Render choir**, then **Preview** or **Export WAV** as before.
+
+**Monitor input** lets you hear routed audio through the YodoChoir track while
+preview is stopped. It defaults off, useful when the source is already audible
+through its own master send. If monitoring through YodoChoir, choose the source
+track's routing so you hear the desired dry signal once. Choir preview replaces
+the monitor signal while playing; it is not added to it.
+
+**Cancel capture** discards the recording and preserves the previous take in the
+slot. Starting a capture does not erase that take. Stopping without receiving any
+samples also preserves it. Finishing source preparation disables recording and
+source editing briefly. Rendering, auditioning and exporting wait until capture
+has finished. The four per-slot REC buttons and main Stop control are not host
+record-arm controls; they record only the audio actually delivered to the plugin.
+
+Recording is independent of Reaper's transport: if the host continues processing
+while stopped, silence or live input can still be captured until you press Stop.
+When the host notifies the plugin of bypass, device release or a sample-rate
+change, capture stops and the partial take is kept at its recorded sample rate.
+If the host simply stops calling the plugin, capture waits for more samples or
+your Stop press.
+A two-minute limit is measured in received audio samples, not wall-clock time.
+Recording requires an active host audio callback. Keep recordings in Reaper if
+transport-synchronised punch-in/out is needed.
+
+![YodoChoir recording routed input](docs/ui-recording.png)
+
+### Duration and storage
+
+Both imported and directly recorded takes now support **120 seconds each**.
+Recorded mono/stereo inputs at 8–192 kHz are summed to mono and converted to the
+same canonical 48 kHz format used by imported files. The original take is retained
+if preparation fails or recording is cancelled. Buffers are allocated before
+recording starts; the audio callback does not grow them or write files.
+
+This version uses bounded memory and embedded samples rather than unlimited disk
+streaming. Four full-length takes add roughly **92 MB** of source PCM to a saved state before host encoding,
+plus temporary capture/render memory. Finish recording before saving: an in-progress
+capture is not included in the session until committed. Existing embedded takes
+continue to be saved during capture. Truly unlimited recording would need disk-backed
+capture, long-file rendering and an external-media/session-management workflow.
+
+## DAW preview
+
+Preview needs active DAW audio callbacks; depending on your host, enable monitoring
+or start the transport. You can also import files without setting up sends.
 
 Any **MIDI Note On** restarts the complete rendered phrase at its original pitch,
-with sample-accurate event timing. Note number/velocity do not transpose or shape
+with sample-accurate event timing. MIDI triggers are ignored during capture and take preparation.
+Note number/velocity do not transpose or shape
 it in this prototype, and Note Off does not truncate the phrase. All Notes Off,
 All Sound Off, the Stop button and host bypass stop preview. Loop preview repeats
 the phrase and room tail. Host tempo, transport position and MIDI chords do not
@@ -62,7 +126,7 @@ changes preview only; export always writes the choir.
 Render jobs run on a background thread and can be cancelled. Audio callbacks read
 already-rendered audio without decoding files, allocating audio buffers or running
 the choir renderer. Float and double host processing are supported; playback is
-resampled at the host sample rate. Closing an editor does not cancel playback or
+resampled at the host sample rate. Closing an editor does not cancel recording, playback or
 rendering; destroying the plugin cancels and joins its worker.
 
 ## Controls
@@ -98,7 +162,7 @@ phrase-edge or A/B clicks on abrupt source material are possible in this prototy
 Sources are **embedded** as lossless 48 kHz float PCM with the controls, seed,
 A/B/loop preference and interface size. Original file paths are not required on
 another machine. Rendered audio is not duplicated in the session; it is rebuilt
-in the background on load. Four maximum-length takes can add roughly 23 MB to a
+in the background on load. Four maximum-length takes can add roughly 92 MB to a
 DAW state. Save/export as usual and allow the render to finish after reopening.
 
 Choose Small (75%), Medium (100%) or Large (125%) at the top right. All controls
@@ -167,7 +231,7 @@ cmake --build build --parallel 3
 ctest --test-dir build --output-on-failure
 ```
 
-The three suites cover deterministic ensemble rendering, variation, stereo and
+The four suites cover deterministic ensemble rendering, variation, stereo and
 mono behaviour, source-rate conversion, extreme controls, headroom, cancellation,
 file import and limits, MIDI event offsets, Original/Choir preview, float/double
 host playback, export samples/format, embedded-source session recall, stale-render
@@ -176,14 +240,22 @@ successful replacement, signature-verification failure and replacement-failure
 rollback with the old copy preserved. Native Mac signing and actual DAW playback need verification on a Mac;
 Linux tests do not establish those results.
 
-In the November 18, 2026 Linux development run, the Release VST3 built and all
-three suites passed. The engine also passed AddressSanitizer/UndefinedBehaviorSanitizer
-checks. A maximum-size fixture (four 30-second sources, 32 singers) rendered in
+In the initial November 18, 2026 Linux development run, the Release VST3 built and
+all three original suites passed. The engine also passed AddressSanitizer/UndefinedBehaviorSanitizer
+checks. An initial stress fixture (four 30-second sources, 32 singers) rendered in
 about 0.9 seconds in this workspace with finite output and the expected length;
 this is one development measurement, not a Mac performance guarantee.
 
-The plugin workflow test writes actual editor previews and synthetic demo WAVs
-under `build/previews`.
+For v0.2, the Linux Release VST3 and all four suites passed, including two
+full 120-second recordings, large embedded-state recall and long WAV export.
+Repeated recording stops were tested against a concurrently running audio callback.
+
+The workflow tests write actual editor previews and synthetic demo WAVs
+under `build/previews`. The recording suite additionally checks mono/stereo input,
+float/double capture at multiple host rates, input monitoring, cancellation,
+bypass/rate-change finalization, an exact 120-second auto-stop, a state larger
+than 32 MB, restoration of two full-length takes, two-minute WAV export, and the
+per-slot recording controls.
 
 ## Next experiments
 

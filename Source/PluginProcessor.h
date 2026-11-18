@@ -18,6 +18,14 @@ public:
     bool exportWav(const juce::File&);
     void play();
     void stop();
+    bool startRecording(int slot);
+    void finishRecording();
+    void cancelRecording();
+    bool isRecording() const { return recording.load(); }
+    bool captureActive() const { return recording.load() || captureBusy.load(); }
+    int recordingSlot() const { return captureSlot.load(); }
+    double recordingSeconds() const { return captureSeconds.load(); }
+    std::array<std::atomic<float>,2> inputPeaks{};
     juce::String status() const;
     std::shared_ptr<const choir::Render> rendered() const;
     float playbackPosition() const { return position.load(); }
@@ -28,13 +36,13 @@ public:
     std::atomic<int> uiSize{2};
     juce::AudioProcessorValueTreeState state;
     void prepareToPlay(double,int) override;
-    void releaseResources() override { stop(); }
+    void releaseResources() override { stop(); finishRecording(); }
     void processBlock(juce::AudioBuffer<float>&,juce::MidiBuffer&) override;
     void processBlock(juce::AudioBuffer<double>&,juce::MidiBuffer&) override;
-    void processBlockBypassed(juce::AudioBuffer<float>& b,juce::MidiBuffer&) override { b.clear(); stop(); }
-    void processBlockBypassed(juce::AudioBuffer<double>& b,juce::MidiBuffer&) override { b.clear(); stop(); }
+    void processBlockBypassed(juce::AudioBuffer<float>& b,juce::MidiBuffer&) override { bypass(b); }
+    void processBlockBypassed(juce::AudioBuffer<double>& b,juce::MidiBuffer&) override { bypass(b); }
     bool supportsDoublePrecisionProcessing() const override { return true; }
-    bool isBusesLayoutSupported(const BusesLayout& b) const override { return b.getMainInputChannelSet().isDisabled() && b.getMainOutputChannelSet()==juce::AudioChannelSet::stereo(); }
+    bool isBusesLayoutSupported(const BusesLayout& b) const override { return (b.getMainInputChannelSet().isDisabled() || b.getMainInputChannelSet()==juce::AudioChannelSet::mono() || b.getMainInputChannelSet()==juce::AudioChannelSet::stereo()) && b.getMainOutputChannelSet()==juce::AudioChannelSet::stereo(); }
     const juce::String getName() const override { return "YodoChoir"; }
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
@@ -50,7 +58,27 @@ public:
     void getStateInformation(juce::MemoryBlock&) override;
     void setStateInformation(const void*,int) override;
 private:
+    struct Capture {
+        std::vector<float> mono; // Allocated and zero-filled off the audio thread.
+        size_t frames=0;
+        double rate=48000.;
+        int slot=0;
+        uint64_t serial=0;
+    };
     void run() override;
+    void finalizeCapture();
+    template<class T> void captureInput(const juce::AudioBuffer<T>&);
+    template<class T> void bypass(juce::AudioBuffer<T>& b) {
+        finishRecording(); stop();
+        if(getTotalNumInputChannels()==0) b.clear();
+        else if(getTotalNumInputChannels()==1 && b.getNumChannels()>1) b.copyFrom(1,0,b,0,0,b.getNumSamples());
+    }
+    juce::SpinLock captureLock;
+    std::unique_ptr<Capture> capture;
+    std::atomic<bool> recording{false},captureBusy{false},capturePending{false},captureInterrupted{false},captureAtLimit{false};
+    std::atomic<uint64_t> captureSerial{0};
+    std::atomic<int> captureSlot{-1};
+    std::atomic<double> captureSeconds{0};
     void message(juce::String);
     void sourcesChanged();
     template<class T> void process(juce::AudioBuffer<T>&,juce::MidiBuffer&);
@@ -61,10 +89,12 @@ private:
     std::array<std::atomic<float>*,7> values{};
     std::atomic<float>* original=nullptr;
     std::atomic<float>* loop=nullptr;
+    std::atomic<float>* monitor=nullptr;
     std::atomic<uint64_t> sourceRevision{0},requestSerial{0},queuedSerial{0};
     std::atomic<bool> pending{false},playing{false},rewind{false};
     mutable juce::SpinLock renderLock;
     std::shared_ptr<const choir::Render> clip;
-    double cursor=0,hostRate=48000.; // Protected by renderLock or audio-thread ownership.
+    std::atomic<double> hostRate{48000.};
+    double cursor=0; // Protected by renderLock or audio-thread ownership.
     std::atomic<float> position{0};
 };
