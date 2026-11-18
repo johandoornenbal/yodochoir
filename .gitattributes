@@ -1,0 +1,3 @@
+# Preserve upstream formatting in Airwindows sources and the matching native adapter.
+third_party/airwindows/** -whitespace
+Source/kWoodRoomEngine.* -whitespace

@@ -19,6 +19,7 @@ public:
     void play();
     void stop();
     bool startRecording(int slot);
+    bool startRecordingAll();
     void finishRecording();
     void cancelRecording();
     bool isRecording() const { return recording.load(); }
@@ -42,7 +43,7 @@ public:
     void processBlockBypassed(juce::AudioBuffer<float>& b,juce::MidiBuffer&) override { bypass(b); }
     void processBlockBypassed(juce::AudioBuffer<double>& b,juce::MidiBuffer&) override { bypass(b); }
     bool supportsDoublePrecisionProcessing() const override { return true; }
-    bool isBusesLayoutSupported(const BusesLayout& b) const override { return (b.getMainInputChannelSet().isDisabled() || b.getMainInputChannelSet()==juce::AudioChannelSet::mono() || b.getMainInputChannelSet()==juce::AudioChannelSet::stereo()) && b.getMainOutputChannelSet()==juce::AudioChannelSet::stereo(); }
+    bool isBusesLayoutSupported(const BusesLayout& b) const override { const auto in=b.getMainInputChannelSet(); return (in.isDisabled() || in==juce::AudioChannelSet::mono() || in==juce::AudioChannelSet::stereo() || in==juce::AudioChannelSet::quadraphonic() || in==juce::AudioChannelSet::create5point1() || in==juce::AudioChannelSet::create7point1SDDS() || in==juce::AudioChannelSet::create7point1()) && b.getMainOutputChannelSet()==juce::AudioChannelSet::stereo(); }
     const juce::String getName() const override { return "YodoChoir"; }
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }
@@ -59,12 +60,16 @@ public:
     void setStateInformation(const void*,int) override;
 private:
     struct Capture {
-        std::vector<float> mono; // Allocated and zero-filled off the audio thread.
+        std::array<std::vector<float>,4> mono; // Allocated and zero-filled off the audio thread.
+        std::array<int,4> firstInput{},channels{};
+        unsigned mask=0;
+        int inputChannels=0;
         size_t frames=0;
         double rate=48000.;
         int slot=0;
         uint64_t serial=0;
     };
+    bool beginRecording(unsigned mask,int selectedSlot);
     void run() override;
     void finalizeCapture();
     template<class T> void captureInput(const juce::AudioBuffer<T>&);
@@ -72,6 +77,7 @@ private:
         finishRecording(); stop();
         if(getTotalNumInputChannels()==0) b.clear();
         else if(getTotalNumInputChannels()==1 && b.getNumChannels()>1) b.copyFrom(1,0,b,0,0,b.getNumSamples());
+        for(int c=2;c<b.getNumChannels();++c) b.clear(c,0,b.getNumSamples());
     }
     juce::SpinLock captureLock;
     std::unique_ptr<Capture> capture;

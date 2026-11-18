@@ -10,8 +10,7 @@ install workflow follow [ToTape Studio](https://github.com/johandoornenbal/tape)
 This is an original **sample-based choir experiment**. Its first goal is to test
 whether independent timing, small pitch changes and several source takes can give
 useful ensemble texture. It does not train a voice model, create new singer
-identities, translate lyrics or reproduce the trained choir models of
-[I AM CHOIR](https://amiaudio.io/). You supply the performance and words.
+identities or translate lyrics. You supply the performance and words.
 
 ## Try it
 
@@ -39,39 +38,57 @@ new pitch/onset offsets. **Reset settings** restores the six render controls and
 seed without clearing recordings. The small `x` beside each take clears that slot;
 click a loaded take to replace it. Drag/drop fills empty slots in order.
 
-## Recording from other tracks in Reaper
+## Record four Reaper sends at once
 
-YodoChoir now has a **stereo audio input** and is listed as a VST3 audio effect
-(with MIDI trigger support). Insert it as an ordinary track FX on a track called,
-for example, “Choir capture”. After updating, restart/rescan Reaper if it still
-shows the older input-free instrument version. The plugin identity is unchanged;
-old no-input instances still work for imported samples and preview. Enable the
-plugin's input bus/pins if an old instance reports that no input is available.
+YodoChoir now exposes **eight audio input pins** and stereo output. Set the
+YodoChoir track to **8 channels** in Reaper's routing window, and use its plugin
+pin connector to map track inputs 1–8 straight to plugin inputs 1–8. The VST3
+input arrangement may be labelled **7.1 Cinema/SDDS** (or 7.1 Music); this is an eight-pin input
+container, while YodoChoir records the consecutive pairs below as four independent
+mono takes. Output remains on track channels 1/2.
 
-1. On a vocal source track, add an **audio send** to the Choir capture track.
-   Route source channels **1/2 → destination channels 1/2**. No MIDI send is
-   required to record audio. Use a normal post-fader send with its level/fader set
-   appropriately; source-track FX and send settings determine what reaches the input.
-2. Press **REC** beside the desired take slot in YodoChoir, then play the phrase
-   in Reaper. The plugin records the samples arriving at its input. The two
-   analogue meters show incoming level while recording.
-3. Press that slot's **STOP**, or the main **Stop** button. The take is prepared
-   in the background and replaces that slot only when preparation succeeds.
-   Recording automatically stops and keeps the take at **2:00**.
-4. For another take, route/solo the next vocal source and record another slot.
-   All sends arriving on input 1/2 are mixed together by Reaper; YodoChoir captures
-   that mix into one take. Record one intended performance at a time for separate
-   singers, and start takes at matching positions in the phrase.
-5. Press **Render choir**, then **Preview** or **Export WAV** as before.
+| Reaper source send | YodoChoir track destination | Recorded slot |
+| --- | --- | --- |
+| Vocal track 1: audio 1/2 | 1/2 | Take 1 |
+| Vocal track 2: audio 1/2 | 3/4 | Take 2 |
+| Vocal track 3: audio 1/2 | 5/6 | Take 3 |
+| Vocal track 4: audio 1/2 | 7/8 | Take 4 |
 
-**Monitor input** lets you hear routed audio through the YodoChoir track while
-preview is stopped. It defaults off, useful when the source is already audible
+1. Insert YodoChoir as an ordinary track FX on a dedicated capture track. Route
+   the four vocal sends as above. No MIDI send is required to record. Source-track
+   FX, send modes and faders determine what reaches each input pair.
+2. Press **REC ALL**, then play the phrases in Reaper. All four slots begin on the
+   same audio callback and receive identical sample counts, keeping them aligned.
+   The input meters show the highest left/right input levels across the four pairs.
+3. Press **STOP ALL** or the main **Stop** button. All four takes are prepared in
+   the background and committed together. They also stop together at **2:00**.
+4. Press **Render choir**, then **Preview** or **Export WAV**.
+
+**Cancel capture** discards the entire recording pass, preserving all previous
+takes. All four slots are replaced after a successful Record all, including slots
+whose input pair was silent. Send each source to only its intended destination pair;
+sending everything to 1/2 mixes those sources into Take 1.
+
+The individual **REC** buttons remain available for retakes: on an eight-input
+instance each uses its own numbered pair. A four- or six-input layout can record
+the available pairs individually, but **REC ALL requires all eight inputs**.
+Older mono/stereo instances still support the previous single-take workflow, where
+any slot's REC button captures input 1/2 (or the mono input). Enable eight inputs
+for the new simultaneous workflow. Rescan/restart Reaper after installing if its
+cached plugin layout still exposes only two pins.
+
+The plugin identity is unchanged, so older input-free instances can still preview
+and render imported samples. Add/enable its input bus to record sends.
+
+**Monitor 1/2** lets you hear the first input pair through the YodoChoir track
+while preview is stopped. Other pairs are recorded independently and are not mixed
+into this monitor signal. It defaults off, useful when the source is already audible
 through its own master send. If monitoring through YodoChoir, choose the source
 track's routing so you hear the desired dry signal once. Choir preview replaces
 the monitor signal while playing; it is not added to it.
 
 **Cancel capture** discards the recording and preserves the previous take in the
-slot. Starting a capture does not erase that take. Stopping without receiving any
+slot. Starting a capture does not erase any previous take. Stopping without receiving any
 samples also preserves it. Finishing source preparation disables recording and
 source editing briefly. Rendering, auditioning and exporting wait until capture
 has finished. The four per-slot REC buttons and main Stop control are not host
@@ -99,7 +116,9 @@ recording starts; the audio callback does not grow them or write files.
 
 This version uses bounded memory and embedded samples rather than unlimited disk
 streaming. Four full-length takes add roughly **92 MB** of source PCM to a saved state before host encoding,
-plus temporary capture/render memory. Finish recording before saving: an in-progress
+plus temporary capture/render memory. A four-pair pass reserves roughly 92 MB at
+48 kHz or 369 MB at 192 kHz before recording; capture and rendering are bounded
+rather than disk-streamed. Finish recording before saving: an in-progress
 capture is not included in the session until committed. Existing embedded takes
 continue to be saved during capture. Truly unlimited recording would need disk-backed
 capture, long-file rendering and an external-media/session-management workflow.
@@ -137,12 +156,17 @@ rendering; destroying the plugin cancels and joins its worker.
 | Pitch spread | 0–25 cents | 9 cents | Independent pitch offsets and gentle slow drift |
 | Timing spread | 0–60 ms | 25 ms | Maximum individual onset delay |
 | Stereo width | 0–100% | 85% | Singer placement; room reflections can still be stereo at 0% |
-| Room | 0–50% | 18% | Small stereo feedback-comb room; adds a 1.2-second tail when enabled |
+| Room | 0–50% | 18% | Airwindows kWoodRoom return; adds a six-second render tail when enabled |
 | Output | −24–0 dB | −3 dB | Gain baked into the next render and export |
 
 Pitch movement uses overlapping 50 ms Hann grains, keeping overall phrase duration
 instead of changing playback speed. A small per-singer high-frequency variation
-adds further differences. Sinc interpolation handles import sample-rate conversion;
+adds further differences. The Room stage uses **Airwindows kWoodRoom**, with native
+Regen 50%, Derez 50%, Filter 25%, Early RF 50%, Position 75%, and native Dry/Wet
+100%. YodoChoir blends that fully wet return with the choir using its Room knob,
+outside the unchanged Airwindows processing. A six-second render tail and the
+existing final fade bound the offline output; this is not a claim that the native
+reverb always decays completely within six seconds. Sinc interpolation handles import sample-rate conversion;
 rendered preview uses linear interpolation when the host is not at 48 kHz.
 
 The dry ensemble scales with singer count. An offline peak scan attenuates the
@@ -231,7 +255,7 @@ cmake --build build --parallel 3
 ctest --test-dir build --output-on-failure
 ```
 
-The four suites cover deterministic ensemble rendering, variation, stereo and
+The five suites cover deterministic ensemble rendering, variation, stereo and
 mono behaviour, source-rate conversion, extreme controls, headroom, cancellation,
 file import and limits, MIDI event offsets, Original/Choir preview, float/double
 host playback, export samples/format, embedded-source session recall, stale-render
@@ -250,12 +274,22 @@ For v0.2, the Linux Release VST3 and all four suites passed, including two
 full 120-second recordings, large embedded-state recall and long WAV export.
 Repeated recording stops were tested against a concurrently running audio callback.
 
+For v0.3, the Linux VST3 build and all five suites passed, including four
+simultaneous 120-second takes and their session recall. Channel-isolation checks
+cover both the default VST3 input order and JUCE's 7.1 Music remapping. kWoodRoom
+passed 96 exact upstream float/double comparisons, and the ensemble test verifies
+its fully wet return and the wrapper Room blend independently.
+
 The workflow tests write actual editor previews and synthetic demo WAVs
 under `build/previews`. The recording suite additionally checks mono/stereo input,
 float/double capture at multiple host rates, input monitoring, cancellation,
 bypass/rate-change finalization, an exact 120-second auto-stop, a state larger
-than 32 MB, restoration of two full-length takes, two-minute WAV export, and the
-per-slot recording controls.
+than 32 MB, restoration of four full-length takes, two-minute WAV export, and the
+per-slot and Record all controls. Parallel checks use distinct signals on all
+eight channels to verify pair isolation, aligned start/stop and cancellation.
+The kWoodRoom suite checks 96 exact float/double comparisons against untouched
+upstream sources with matched noise seeds; the ensemble suite independently
+checks its fully wet return, external blend and six-second export tail.
 
 ## Next experiments
 

@@ -1,4 +1,5 @@
 #include "ChoirEngine.h"
+#include "kWoodRoomEngine.h"
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -14,16 +15,7 @@ double read(const std::vector<float>& data,double pos) {
     const auto i=static_cast<size_t>(pos); const double f=pos-double(i);
     return data[i]*(1.-f)+data[i+1]*f;
 }
-struct Comb {
-    std::vector<float> data;
-    size_t cursor=0;
-    float low=0;
-    explicit Comb(int size):data(static_cast<size_t>(size),0.f) {}
-    float tick(float x) {
-        const float y=data[cursor]; low=.3f*y+.7f*low;
-        data[cursor]=x+low*.72f; cursor=(cursor+1)%data.size(); return y;
-    }
-};
+
 }
 bool Settings::operator==(const Settings& b) const {
     return singers==b.singers && detune==b.detune && timing==b.timing && width==b.width
@@ -90,7 +82,7 @@ std::unique_ptr<Render> render(const std::array<std::shared_ptr<const Take>,slot
         || !std::isfinite(s.timing) || s.timing<0 || s.timing>60 || !std::isfinite(s.width) || s.width<0 || s.width>1
         || !std::isfinite(s.room) || s.room<0 || s.room>.5f || !std::isfinite(s.outputDb) || s.outputDb<-24 || s.outputDb>0)
         throw std::invalid_argument("Invalid ensemble settings");
-    const size_t tail=s.room>0?sampleRate*6/5:0;
+    const size_t tail=s.room>0?sampleRate*6:0;
     const size_t count=longest+static_cast<size_t>(std::ceil(s.timing*.001*sampleRate))+tail;
     auto result=std::make_unique<Render>(); result->settings=s;
     result->left.resize(count); result->right.resize(count); result->dry.resize(count);
@@ -139,14 +131,19 @@ std::unique_ptr<Render> render(const std::array<std::shared_ptr<const Take>,slot
         if(progress) progress(.85f*static_cast<float>(v+1)/static_cast<float>(s.singers));
     }
     if(s.room>0) {
-        std::array<Comb,4> l{Comb(1427),Comb(1781),Comb(1973),Comb(2099)};
-        std::array<Comb,4> r{Comb(1453),Comb(1811),Comb(2003),Comb(2131)};
-        for(size_t i=0;i<count;++i) {
-            if((i&4095u)==0u && cancel && cancel()) return {};
-            const float a=result->left[i],b=result->right[i]; float wetL=0,wetR=0;
-            for(size_t j=0;j<4;++j) { wetL+=l[j].tick(a*.85f+b*.15f)*.25f; wetR+=r[j].tick(b*.85f+a*.15f)*.25f; }
-            result->left[i]=a*(1.f-s.room*.25f)+wetL*s.room;
-            result->right[i]=b*(1.f-s.room*.25f)+wetR*s.room;
+        auto room=std::make_unique<kWoodRoomEngine>();room->reset(sampleRate);
+        constexpr std::array<float,6> nativeDefaults{.5f,.5f,.25f,.5f,.75f,1.f};
+        for(int i=0;i<6;++i) room->setParameter(i,nativeDefaults[static_cast<size_t>(i)]);
+        std::array<float,256> wetL{},wetR{};
+        for(size_t offset=0;offset<count;offset+=wetL.size()) {
+            if(cancel && cancel()) return {};
+            const size_t n=std::min(wetL.size(),count-offset);
+            std::copy_n(result->left.data()+offset,n,wetL.data());std::copy_n(result->right.data()+offset,n,wetR.data());
+            float* audio[]{wetL.data(),wetR.data()};room->processReplacing(audio,audio,static_cast<int>(n));
+            for(size_t i=0;i<n;++i) {
+                result->left[offset+i]=result->left[offset+i]*(1.f-s.room)+wetL[i]*s.room;
+                result->right[offset+i]=result->right[offset+i]*(1.f-s.room)+wetR[i]*s.room;
+            }
         }
     }
     if(progress) progress(.95f);

@@ -1,4 +1,5 @@
 #include "ChoirEngine.h"
+#include "kWoodRoomEngine.h"
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -34,5 +35,23 @@ int main() try {
     check(converted.size()==48000,"Import duration changed");
     double error=0; for(int i=100;i<47000;++i) error+=std::abs(converted[static_cast<size_t>(i)]-.5*std::sin(2*3.141592653589793*440*i/48000.));
     check(error/46900<.001,"Resampling pitch or quality failure");
+    // Independent kWoodRoom return verifies native routing and the external Room blend.
+    std::array<std::shared_ptr<const choir::Take>,4> roomBank{};
+    auto pulse=std::make_shared<choir::Take>();pulse->mono.resize(1000);pulse->mono[10]=.01f;roomBank[0]=pulse;
+    choir::Settings roomSettings{1,0,0,0,.18f,0,1977};auto roomResult=choir::render(roomBank,roomSettings);
+    check(roomResult->left.size()==1000+6*choir::sampleRate,"kWoodRoom render tail is not six seconds");
+    auto native=std::make_unique<kWoodRoomEngine>();native->reset(choir::sampleRate);
+    const std::array<float,6> nativeValues{.5f,.5f,.25f,.5f,.75f,1.f};
+    for(int i=0;i<6;++i) native->setParameter(i,nativeValues[static_cast<size_t>(i)]);
+    std::vector<float> wl(roomResult->left.size()),wr(wl.size());wl[10]=wr[10]=.01f;
+    for(size_t offset=0;offset<wl.size();offset+=256) {
+        float* block[]{wl.data()+offset,wr.data()+offset};native->processReplacing(block,block,static_cast<int>(std::min<size_t>(256,wl.size()-offset)));
+    }
+    for(size_t i=0;i<wl.size();++i) {
+        const float dry=i==10?.01f:0.f;const size_t fade=choir::sampleRate/50;
+        const float ramp=i>=wl.size()-fade?static_cast<float>(wl.size()-1-i)/static_cast<float>(fade):1.f;
+        check(std::abs(roomResult->left[i]-(dry*(1.f-roomSettings.room)+wl[i]*roomSettings.room)*ramp)<1.e-7f
+           && std::abs(roomResult->right[i]-(dry*(1.f-roomSettings.room)+wr[i]*roomSettings.room)*ramp)<1.e-7f,"Room stage altered native kWoodRoom output or applied blend incorrectly");
+    }
     std::cout<<"Ensemble: deterministic rendering, variation, stereo, duration, headroom, cancellation, solo, extremes and resampling passed\n";
 } catch(const std::exception& e) { std::cerr<<e.what()<<'\n'; return 1; }

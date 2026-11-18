@@ -20,6 +20,7 @@ void rendered(ChoirProcessor& p) {
     const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(45);
     while(!p.current() || p.busy.load()) { check(std::chrono::steady_clock::now()<end,"Long render timed out"); pump(); }
 }
+void stereo(ChoirProcessor& p) { auto b=p.getBusesLayout();b.inputBuses.set(0,juce::AudioChannelSet::stereo());check(p.setBusesLayout(b),"Stereo fallback rejected"); }
 void set(ChoirProcessor& p,const char* id,float value) { auto* param=p.state.getParameter(id); check(param,"Missing parameter"); param->setValueNotifyingHost(param->convertTo0to1(value)); }
 juce::Component* find(juce::Component& p,const juce::String& id) {
     if(p.getComponentID()==id) return &p;
@@ -31,7 +32,7 @@ void screenshot(juce::AudioProcessorEditor& editor,const juce::File& path) {
     out->setPosition(0); out->truncate(); check(juce::PNGImageFormat().writeImageToStream(image,*out),"Cannot encode recording preview");
 }
 template<class T> void capturedRate(double rate) {
-    ChoirProcessor p; p.prepareToPlay(rate,513); p.loadDemo(); const auto old=p.takes()[0];
+    ChoirProcessor p; stereo(p); p.prepareToPlay(rate,513); p.loadDemo(); const auto old=p.takes()[0];
     check(p.startRecording(0),"Cannot arm stereo recording");
     check(!p.startRecording(1),"Concurrent capture was accepted");
     std::vector<float> expected;
@@ -57,7 +58,7 @@ template<class T> void capturedRate(double rate) {
     p.requestRender(); rendered(p); check(p.rendered()->left.size()>=take->mono.size(),"Captured take could not render");
 }
 void concurrentStops() {
-    ChoirProcessor p; p.prepareToPlay(48000,128);
+    ChoirProcessor p; stereo(p); p.prepareToPlay(48000,128);
     std::atomic<bool> running{true};
     std::thread audioThread([&] {
         juce::AudioBuffer<float> block(2,128); juce::MidiBuffer midi;
@@ -77,11 +78,57 @@ void concurrentStops() {
     } catch(...) {running=false;audioThread.join();throw;}
     running=false; audioThread.join();
 }
+template<class T> void fourPairs(double rate,bool music=false) {
+    ChoirProcessor p;
+    if(music) {auto layout=p.getBusesLayout();layout.inputBuses.set(0,juce::AudioChannelSet::create7point1());check(p.setBusesLayout(layout),"7.1 Music input rejected");}
+    // Match the JUCE VST3 wrapper's host-pin -> process-buffer permutation.
+    const std::array<int,8> channel=music?std::array<int,8>{0,1,2,3,6,7,4,5}:std::array<int,8>{0,1,2,3,4,5,6,7};
+    p.prepareToPlay(rate,513);
+    check(p.getTotalNumInputChannels()==8 && p.getTotalNumOutputChannels()==2,"Default bus must be 8 in / 2 out");
+    check(p.startRecordingAll() && p.recordingSlot()==-2,"Cannot arm all four pairs");
+    std::array<std::vector<float>,4> expected;
+    juce::MidiBuffer midi;
+    for(int block=0;block<20;++block) {
+        const int n=std::array<int,5>{1,37,256,513,127}[static_cast<size_t>(block%5)];juce::AudioBuffer<T> input(8,n);
+        for(int i=0;i<n;++i) {
+            const auto frame=expected[0].size();
+            for(int pair=0;pair<4;++pair) {
+                const T l=static_cast<T>(.1*(2*pair+1)+.01*std::sin(double(frame)*(.02+pair*.01)));
+                const T r=static_cast<T>(.1*(2*pair+2)+.01*std::cos(double(frame)*(.03+pair*.01)));
+                input.setSample(channel[static_cast<size_t>(pair*2)],i,l);input.setSample(channel[static_cast<size_t>(pair*2+1)],i,r);
+                expected[static_cast<size_t>(pair)].push_back(static_cast<float>((double(static_cast<float>(l))+double(static_cast<float>(r)))*.5));
+            }
+        }
+        p.processBlock(input,midi);
+        for(int c=0;c<8;++c) check(input.getMagnitude(c,0,n)==0,"Unused input pins leaked into output");
+        for(const auto& t:p.takes()) check(!t,"A parallel capture was committed before Stop");
+    }
+    p.finishRecording();finished(p);
+    for(size_t pair=0;pair<4;++pair) {
+        const auto converted=choir::resample(expected[pair],rate);
+        check(p.takes()[pair] && p.takes()[pair]->mono==converted,"Input pair leaked into or missed its assigned take");
+        check(p.takes()[pair]->mono.size()==p.takes()[0]->mono.size(),"Simultaneous takes are not sample-aligned");
+    }
+    const auto bank=p.takes();
+    check(p.startRecordingAll(),"Cannot start parallel cancellation test");juce::AudioBuffer<T> block(8,512);block.clear();p.processBlock(block,midi);p.cancelRecording();finished(p);
+    check(p.takes()==bank,"Cancelling parallel capture replaced previous takes");
+    // Single-slot recording uses that slot's own pair on an eight-input instance.
+    check(p.startRecording(3),"Cannot record pair 7/8 independently");
+    for(int c=0;c<8;++c) for(int i=0;i<512;++i) block.setSample(channel[static_cast<size_t>(c)],i,static_cast<T>((c+1)*.1));
+    p.processBlock(block,midi);p.finishRecording();finished(p);
+    std::vector<float> mono(512,static_cast<float>((double(static_cast<float>(T(.7)))+double(static_cast<float>(T(.8))))*.5));
+    check(p.takes()[3]->mono==choir::resample(mono,rate),"Single-slot capture did not use pair 7/8");
+    for(size_t pair=0;pair<3;++pair) check(p.takes()[pair]==bank[pair],"Single-slot capture changed another pair");
+    auto buses=p.getBusesLayout();buses.inputBuses.set(0,juce::AudioChannelSet::stereo());check(p.setBusesLayout(buses),"Legacy stereo input rejected");
+    check(!p.startRecordingAll(),"Record all armed without eight inputs");
+}
+
 int main() try {
     juce::ScopedJuceInitialiser_GUI init;
+    fourPairs<float>(48000);fourPairs<double>(44100);fourPairs<float>(48000,true);
     concurrentStops();
     capturedRate<float>(44100); capturedRate<float>(48000); capturedRate<double>(96000); capturedRate<double>(192000);
-    ChoirProcessor p; p.prepareToPlay(48000,512); p.loadDemo(); const auto old=p.takes()[0];
+    ChoirProcessor p; stereo(p); p.prepareToPlay(48000,512); p.loadDemo(); const auto old=p.takes()[0];
     check(p.getTotalNumInputChannels()==2,"Default Reaper input is not stereo");
     juce::AudioBuffer<float> audio(2,512); juce::MidiBuffer midi;
     for(int c=0;c<2;++c) for(int i=0;i<512;++i) audio.setSample(c,i,c==0?.25f:.5f);
@@ -110,24 +157,25 @@ int main() try {
     juce::MemoryBlock legacyData; {juce::MemoryOutputStream output(legacyData,false);legacy.writeToStream(output);}
     p.setStateInformation(legacyData.getData(),static_cast<int>(legacyData.getSize())); rendered(p);
     check(p.state.getRawParameterValue("inputMonitor")->load()==0,"Legacy session enabled live monitoring");
-    // Two full 120-second takes produce a session larger than the old 32 MB bound.
+    // Four full 120-second takes share one auto-stop and the larger state bound.
     ChoirProcessor longTakes; longTakes.prepareToPlay(48000,16384);
-    juce::AudioBuffer<double> chunk(2,16384);
-    for(int slot=0;slot<2;++slot) {
-        check(longTakes.startRecording(slot),"Could not start two-minute recording");
-        size_t sent=0; const size_t limit=static_cast<size_t>(choir::sampleRate*choir::maxSeconds);
-        while(longTakes.isRecording()) {
-            const int n=static_cast<int>(std::min<size_t>(16384,limit+17-sent)); chunk.setSize(2,n,false,false,true);
-            for(int i=0;i<n;++i) {chunk.setSample(0,i,.25);chunk.setSample(1,i,.5);} longTakes.processBlock(chunk,midi); sent+=static_cast<size_t>(n);
-        }
-        finished(longTakes);
-        check(longTakes.recordingSeconds()==120. && longTakes.takes()[static_cast<size_t>(slot)]->mono.size()==limit,"Auto-stop did not preserve exactly 120 seconds");
-        check(longTakes.takes()[static_cast<size_t>(slot)]->mono.front()==.375f && longTakes.takes()[static_cast<size_t>(slot)]->mono.back()==.375f,"Long recording was truncated or corrupted");
+    juce::AudioBuffer<double> chunk(8,16384);
+    check(longTakes.startRecordingAll(),"Could not start two-minute parallel recording");
+    size_t sent=0;const size_t limit=static_cast<size_t>(choir::sampleRate*choir::maxSeconds);
+    while(longTakes.isRecording()) {
+        const int n=static_cast<int>(std::min<size_t>(16384,limit+17-sent));chunk.setSize(8,n,false,false,true);
+        for(int c=0;c<8;++c) for(int i=0;i<n;++i) chunk.setSample(c,i,.125*(c/2+1));
+        longTakes.processBlock(chunk,midi);sent+=static_cast<size_t>(n);
+    }
+    finished(longTakes);
+    for(size_t slot=0;slot<4;++slot) {
+        check(longTakes.recordingSeconds()==120. && longTakes.takes()[slot]->mono.size()==limit,"Shared auto-stop did not preserve exactly 120 seconds in every take");
+        check(longTakes.takes()[slot]->mono.front()==.125f*static_cast<float>(slot+1) && longTakes.takes()[slot]->mono.back()==.125f*static_cast<float>(slot+1),"Long parallel recording was truncated or crossed pairs");
     }
     set(longTakes,"singers",4);set(longTakes,"detune",0);set(longTakes,"timing",0);set(longTakes,"room",0);
     longTakes.getStateInformation(state); check(state.getSize()>32*1024*1024,"Long-session fixture did not exceed the previous limit");
     ChoirProcessor restored; restored.setStateInformation(state.getData(),static_cast<int>(state.getSize())); rendered(restored);
-    check(restored.takes()[0]->mono==longTakes.takes()[0]->mono && restored.takes()[1]->mono==longTakes.takes()[1]->mono,"Long recordings did not survive session recall");
+    for(size_t slot=0;slot<4;++slot) check(restored.takes()[slot]->mono==longTakes.takes()[slot]->mono,"Long parallel recordings did not survive session recall");
     check(restored.rendered()->left.size()==static_cast<size_t>(48000*120),"Two-minute choir duration changed");
     const auto dir=juce::File::getCurrentWorkingDirectory().getChildFile("previews"); dir.createDirectory();
     const auto wav=dir.getChildFile("two-minute-test.wav"); check(restored.exportWav(wav),"Two-minute WAV export failed");
@@ -136,9 +184,10 @@ int main() try {
     // Native recording controls and an actual screenshot of the armed input path.
     ChoirProcessor ui; ui.prepareToPlay(48000,512); ui.loadDemo();
     std::unique_ptr<juce::AudioProcessorEditor> editor(ui.createEditor());
-    auto* record=dynamic_cast<juce::Button*>(find(*editor,"record2")); check(record && record->onClick,"Per-take record control missing");record->onClick();
-    check(ui.isRecording() && ui.recordingSlot()==2,"Record button armed wrong slot");
-    for(int block=0;block<50;++block) {for(int c=0;c<2;++c) for(int i=0;i<512;++i) audio.setSample(c,i,.4f*std::sin((block*512+i)*.04f));ui.processBlock(audio,midi);}
+    auto* record=dynamic_cast<juce::Button*>(find(*editor,"recordAll")); check(record && record->onClick,"Record all control missing");record->onClick();
+    check(ui.isRecording() && ui.recordingSlot()==-2,"Record all did not arm all four slots");
+    juce::AudioBuffer<float> pairs(8,512);
+    for(int block=0;block<50;++block) {for(int c=0;c<8;++c) for(int i=0;i<512;++i) pairs.setSample(c,i,.4f*std::sin((block*512+i)*(.04f+c*.005f)));ui.processBlock(pairs,midi);}
     for(int i=0;i<40;++i) pump();
     bool inputVisible=false;
     for(auto* child:editor->getChildComponent(0)->getChildren()) if(auto* meter=dynamic_cast<OutputMeter*>(child)) inputVisible=inputVisible || meter->getLevelDb()>-30.f;
