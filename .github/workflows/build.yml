@@ -1,0 +1,42 @@
+name: Build and test YodoChoir
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  portable-dsp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure engine
+        run: cmake -S . -B build-dsp -DYODOCHOIR_DSP_ONLY=ON -DCMAKE_BUILD_TYPE=Release
+      - name: Build and test engine
+        run: |
+          cmake --build build-dsp --parallel 2
+          ctest --test-dir build-dsp --output-on-failure
+  apple-silicon:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check native runner
+        run: test "$(uname -m)" = arm64
+      - name: Configure arm64 VST3
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+      - name: Build and test workflow
+        run: |
+          cmake --build build --config Release --parallel 3
+          ctest --test-dir build -C Release --output-on-failure
+      - name: Sign staged plugin and validate installation
+        run: |
+          YODOCHOIR_INSTALL_DIR="$RUNNER_TEMP/yodochoir-install" bash scripts/build-sign-install-mac.sh --install-only "$PWD/build/YodoChoir_artefacts/Release/VST3/YodoChoir.vst3"
+          codesign --verify --deep --strict "$RUNNER_TEMP/yodochoir-install/YodoChoir.vst3"
+          ditto -c -k --sequesterRsrc --keepParent "$RUNNER_TEMP/yodochoir-install/YodoChoir.vst3" YodoChoir-macOS-arm64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YodoChoir-macOS-arm64
+          path: YodoChoir-macOS-arm64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YodoChoir-preview-and-demo
+          path: |
+            build/previews/ui-*.png
+            build/previews/demo-*.wav
