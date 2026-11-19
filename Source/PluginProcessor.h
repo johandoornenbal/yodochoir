@@ -96,6 +96,7 @@ private:
         choir::Settings settings;
         double startSeconds=0,length=0;
         bool success=false;
+        std::shared_ptr<ReaperBridge::PeakBuild> peaks;
     };
     void timerCallback() override;
     void writeAudio();
@@ -116,6 +117,7 @@ private:
     double expectedPosition=0; // Audio-thread timeline continuity guard.
     std::mutex writeMutex;
     std::unique_ptr<WriteJob> writeJob;
+    std::unique_ptr<WriteJob> placingJob; // Message-thread-only peak generation and placement.
     std::atomic<bool> writeBusy{false},writePending{false},writeReady{false};
     std::atomic<bool> recording{false},captureBusy{false},capturePending{false},captureInterrupted{false},captureAtLimit{false};
     std::atomic<uint64_t> captureSerial{0};

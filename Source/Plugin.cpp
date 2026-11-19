@@ -278,17 +278,33 @@ void ChoirProcessor::timerCallback() {
         ReaperBridge::Context c;juce::String ignored;
         if(reaper.context(c,ignored,false) && (reaper.playState(c)&1)==0) finishRecording();
     }
-    if(!writeReady.exchange(false)) return;
-    std::unique_ptr<WriteJob> job;{const std::lock_guard<std::mutex> lock(writeMutex);job=std::move(writeJob);}
-    if(job && job->success) {
-        juce::String error;
-        if(sourceRevision.load()!=job->revision || !(settings()==job->settings)) message("Takes or settings changed during writing. WAV retained; write again for the current settings.");
-        else if(reaper.insert(job->context,job->file,job->startSeconds,job->length,error)) {
-            auto* parameter=state.getParameter("inputMonitor");parameter->beginChangeGesture();parameter->setValueNotifyingHost(1.f);parameter->endChangeGesture();stop();
-            message("Written to this REAPER track at "+juce::String(job->startSeconds,6)+" s. Track audio ON; mute source sends for choir-only playback.");
-        } else message(error+" "+job->file.getFullPathName());
+    if(writeReady.exchange(false)) {
+        const std::lock_guard<std::mutex> lock(writeMutex);placingJob=std::move(writeJob);
+        if(!placingJob) writeBusy=false;
     }
-    writeBusy=false;
+    if(!placingJob) return;
+    auto& job=*placingJob;
+    const auto finish=[this]{placingJob.reset();writeBusy=false;};
+    if(!job.success) {finish();return;}
+    juce::String error;ReaperBridge::Context actual;
+    if(sourceRevision.load()!=job.revision || !(settings()==job.settings)) {
+        message("Takes or settings changed during writing. WAV retained; write again for the current settings.");finish();return;
+    }
+    if(!reaper.context(actual,error) || !(actual==job.context) || (reaper.playState(actual)&7)!=0) {
+        message("Track/project changed or transport started during writing. WAV retained: "+job.file.getFullPathName());finish();return;
+    }
+    if(!job.peaks) {
+        job.peaks=reaper.preparePeaks(job.file,error);
+        if(!job.peaks) {message(error+" "+job.file.getFullPathName());finish();return;}
+    }
+    if(!reaper.advancePeaks(job.peaks)) return;
+    // Transfer the prepared source itself into the new take. This also keeps
+    // its in-memory peaks when Reaper is configured not to save peak files.
+    if(reaper.insert(job.context,job.file,job.startSeconds,job.length,error,job.peaks)) {
+        auto* parameter=state.getParameter("inputMonitor");parameter->beginChangeGesture();parameter->setValueNotifyingHost(1.f);parameter->endChangeGesture();stop();
+        message("Written to this REAPER track at "+juce::String(job.startSeconds,6)+" s. Track audio ON; mute source sends for choir-only playback.");
+    } else message(error+" "+job.file.getFullPathName());
+    finish();
 }
 
 void ChoirProcessor::run() {
@@ -690,7 +706,7 @@ private:
         ab.setButtonText(ab.getToggleState()?"A: Original take":"B: Choir");
         const auto r=processor.rendered();
         const auto text=processor.status();
-        statusLabel.setText(writing?"Writing phase: render, save WAV and place the item at the captured start.":capturing?(processor.isArmed()?"Armed. Use REAPER Play to start; transport Stop ends capture.":processor.isRecording()?"Recording routed input. Press STOP to keep it, or Cancel capture to keep the previous take.":"Preparing the recorded take..."):!working && r && !ready && text.startsWith("Choir ready")?"Takes or settings changed. Render choir again before preview or export.":text,juce::dontSendNotification);
+        statusLabel.setText(writing?"Writing phase: render, save WAV, prepare waveform and place the aligned item.":capturing?(processor.isArmed()?"Armed. Use REAPER Play to start; transport Stop ends capture.":processor.isRecording()?"Recording routed input. Press STOP to keep it, or Cancel capture to keep the previous take.":"Preparing the recorded take..."):!working && r && !ready && text.startsWith("Choir ready")?"Takes or settings changed. Render choir again before preview or export.":text,juce::dontSendNotification);
         if(sizeChoice.getSelectedId()!=processor.uiSize.load()) {sizeChoice.setSelectedId(processor.uiSize.load(),juce::dontSendNotification);if(sizeChanged)sizeChanged();}
     }
     void timerCallback() override {

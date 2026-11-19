@@ -4,9 +4,15 @@
 #include <thread>
 #include <iostream>
 #include <map>
+#include <set>
 #include <cstring>
 #include <stdexcept>
-class PCM_source {public:juce::String path;};
+static int liveSources=0;
+class PCM_source {
+public:
+    juce::String path;bool cachedAtOpen=false,building=false,peaksReady=false;int remaining=0;
+    PCM_source(){++liveSources;}~PCM_source(){--liveSources;}
+};
 class MediaItem_Take {public:PCM_source* source=nullptr;std::map<std::string,double> values;~MediaItem_Take(){delete source;}};
 class MediaItem {public:std::unique_ptr<MediaItem_Take> take;std::map<std::string,double> values;};
 class MediaTrack {public:std::vector<std::unique_ptr<MediaItem>> items;};
@@ -14,7 +20,12 @@ class ReaProject {public:juce::File file;bool playing=false;double cursor=999.;}
 namespace {
 ReaProject owning,other;
 MediaTrack track,selected;
-bool failPosition=false;
+bool failPosition=false,failPeakOpen=false,savePeakFiles=true;
+PCM_source* lastPeakSource=nullptr;
+std::set<std::string> peakCache;
+int peakBegins=0,peakRuns=0,peakFinishes=0,itemUpdates=0;
+const auto messageThread=std::this_thread::get_id();
+void mainThread() {if(std::this_thread::get_id()!=messageThread)throw std::runtime_error("Peak/item API called outside message thread");}
 int begins=0,ends=0;
 ReaProject* undoProject=nullptr;
 ReaProject* projects(int i,char* out,int length) {
@@ -27,7 +38,23 @@ int playState(ReaProject* p) {return p->playing?1:0;}
 double editCursor(ReaProject* p) {return p->cursor;}
 MediaItem* addItem(MediaTrack* t) {t->items.push_back(std::make_unique<MediaItem>());return t->items.back().get();}
 MediaItem_Take* addTake(MediaItem* item) {item->take=std::make_unique<MediaItem_Take>();return item->take.get();}
-PCM_source* source(const char* file) {if(!juce::File(juce::String::fromUTF8(file)).existsAsFile()) return nullptr;auto* p=new PCM_source;p->path=file;return p;}
+PCM_source* source(const char* file) {
+    mainThread();if(failPeakOpen || !juce::File(juce::String::fromUTF8(file)).existsAsFile()) return nullptr;
+    auto* p=new PCM_source;p->path=file;p->cachedAtOpen=peakCache.count(file)!=0;p->peaksReady=p->cachedAtOpen;return p;
+}
+int buildPeaks(PCM_source* src,int mode) {
+    mainThread();
+    if(mode==0) {lastPeakSource=src;++peakBegins;if(src->cachedAtOpen)return 0;src->building=true;src->remaining=10;return 1;}
+    if(!src->building)throw std::runtime_error("Peak Run/Finish without Begin");
+    if(mode==1) {++peakRuns;std::this_thread::sleep_for(std::chrono::milliseconds(2));return --src->remaining;}
+    if(mode!=2)throw std::runtime_error("Unexpected peak build mode");
+    ++peakFinishes;src->building=false;if(src->remaining==0){src->peaksReady=true;if(savePeakFiles)peakCache.insert(src->path.toStdString());}return 0;
+}
+void updateItem(MediaItem* item) {
+    mainThread();if(!item->take || !item->take->source || !item->take->source->peaksReady || item->values["D_LENGTH"]<=0)
+        throw std::runtime_error("Item refreshed before waveform cache or item setup was ready");
+    ++itemUpdates;
+}
 void destroy(PCM_source* p) {delete p;}
 void* takeInfo(MediaItem_Take* t,const char* name,void* value) {if(std::strcmp(name,"P_SOURCE")!=0)return nullptr;if(value)t->source=static_cast<PCM_source*>(value);return t->source;}
 bool itemValue(MediaItem* i,const char* name,double value) {if(failPosition && std::strcmp(name,"D_POSITION")==0)return false;i->values[name]=value;return true;}
@@ -42,6 +69,7 @@ void* api(const char* name) {
     API("EnumProjects",projects);API("ValidatePtr2",valid);API("GetPlayStateEx",playState);API("GetCursorPositionEx",editCursor);
     API("AddMediaItemToTrack",addItem);API("AddTakeToMediaItem",addTake);API("PCM_Source_CreateFromFile",source);API("PCM_Source_Destroy",destroy);
     API("GetSetMediaItemTakeInfo",takeInfo);API("SetMediaItemInfo_Value",itemValue);API("GetMediaItemInfo_Value",itemRead);API("SetMediaItemTakeInfo_Value",takeValue);
+    API("PCM_Source_BuildPeaks",buildPeaks);API("UpdateItemInProject",updateItem);
     API("DeleteTrackMediaItem",removeItem);API("Undo_BeginBlock2",undoBegin);API("Undo_EndBlock2",undoEnd);API("UpdateArrange",refresh);
 #undef API
     return nullptr;
@@ -94,7 +122,11 @@ int main() try {
         head.moving=false;owning.playing=false;head.sample=0;process(p,head,256);wait([&]{return !p.captureActive();});
         for(const auto& t:p.takes())check(t && t->mono.size()==610 && t->hasTimeline && t->startSeconds==origin,"Transport boundary/start position was not preserved");
         // Writing renders automatically, targets the owning track/project, and ignores the later cursor.
-        p.requestWrite();check(p.isWriting(),"Write phase did not start");wait([&]{return !p.isWriting();});
+        p.requestWrite();check(p.isWriting(),"Write phase did not start");
+        wait([&]{return peakBegins==1;});
+        check(p.isWriting() && track.items.empty() && peakRuns>0 && peakFinishes==0,"Peak preparation blocked or inserted an item before completing");
+        wait([&]{return !p.isWriting();});
+        check(peakRuns==10 && peakFinishes==1 && itemUpdates==1 && liveSources==1,"Peak lifecycle did not finish/transfer before item refresh");
         check(track.items.size()==1 && selected.items.empty(),"Write did not target the plugin's own track");
         auto& item=*track.items[0];const auto r=p.rendered();
         check(std::abs(item.values["D_POSITION"]-origin)<1.e-12 && item.values["D_POSITION"]!=owning.cursor,"Write used the later cursor instead of captured start");
@@ -126,12 +158,42 @@ int main() try {
             stopped.requestWrite();check(!stopped.isWriting(),"Unsaved project accepted a native write");
             owning.file=savedFile;
         }
+        // Already-cached files must not receive Run or Finish when Begin returns zero.
+        {
+            juce::String error;const int runs=peakRuns,finishes=peakFinishes;
+            auto cached=p.reaper.preparePeaks(juce::File(item.take->source->path),error);
+            check(cached && p.reaper.advancePeaks(cached) && peakRuns==runs && peakFinishes==finishes,"Cached-peak fast path ran/finalized an inactive build");
+        }
+        check(liveSources==1,"Cached peak source leaked");
         // Another write adds a new item; it does not replace an existing print.
         p.requestWrite();wait([&]{return !p.isWriting();});check(track.items.size()==2,"Repeated writing replaced the earlier item");
+        // The same prepared source must be transferred to the take even when
+        // Reaper does not persist peak-cache files to disk.
+        {
+            const auto uncached=root.getChildFile("no-disk-peaks.wav");
+            check(juce::File(item.take->source->path).copyFileTo(uncached),"Cannot create uncached fixture");
+            savePeakFiles=false;juce::String error;
+            auto peaks=p.reaper.preparePeaks(uncached,error);check(bool(peaks),"Cannot begin memory-only peaks");
+            wait([&]{return p.reaper.advancePeaks(peaks);});auto* prepared=lastPeakSource;
+            check(peakCache.count(uncached.getFullPathName().toStdString())==0,"Memory-only fixture wrote a peak cache");
+            ReaperBridge::Context context;check(p.reaper.context(context,error),"Cannot resolve print context");
+            check(p.reaper.insert(context,uncached,origin,double(r->left.size())/96000.,error,peaks),"Cannot insert a source with memory-only peaks");
+            check(track.items.size()==3 && track.items.back()->take->source==prepared && prepared->peaksReady,"Insertion discarded prepared in-memory waveform peaks");
+            check(removeItem(&track,track.items.back().get()),"Cannot simulate undo of memory-only item");
+            peaks.reset();savePeakFiles=true;check(liveSources==2,"Prepared source transferred or freed twice");
+        }
         failPosition=true;p.requestWrite();wait([&]{return !p.isWriting();});failPosition=false;
         check(track.items.size()==2 && selected.items.empty() && begins==ends,"Failed insertion did not roll back its new item");
         p.requestWrite();host.parent=&selected;wait([&]{return !p.isWriting();});host.parent=&track;
         check(track.items.size()==2 && selected.items.empty(),"Changing track context redirected an in-flight write");
+        // A context change between peak slices cancels only the private build;
+        // there is no host item/source pointer held across callbacks.
+        const int before=peakBegins,finishes=peakFinishes;
+        p.requestWrite();wait([&]{return peakBegins>before;});host.parent=&selected;
+        wait([&]{return !p.isWriting();});host.parent=&track;
+        check(track.items.size()==2 && selected.items.empty() && peakFinishes==finishes+1 && liveSources==2,"In-flight peak cancellation leaked its source or inserted an item");
+        failPeakOpen=true;p.requestWrite();wait([&]{return !p.isWriting();});failPeakOpen=false;
+        check(track.items.size()==2 && liveSources==2,"Peak source open failure changed existing items");
         // Arming while already playing waits for a complete stop/start edge.
         ChoirProcessor edge;TestTransport clock;edge.setPlayHead(&clock);edge.prepareToPlay(48000,256);
         clock.moving=true;process(edge,clock,256);check(edge.startRecordingAll(),"Cannot arm during playback");process(edge,clock,256);
@@ -146,9 +208,10 @@ int main() try {
         p.loadDemo();owning.cursor=12.75;p.requestWrite();wait([&]{return !p.isWriting();});
         check(track.items.size()==3 && track.items.back()->values["D_POSITION"]==12.75,"Imported take insertion did not use its explicit Write cursor");
         ChoirProcessor unsupported;unsupported.loadDemo();unsupported.requestWrite();check(!unsupported.isWriting(),"Unsupported host started a destructive write");
+        unsupported.reaper.connect([](const char* name)->void*{return std::strcmp(name,"PCM_Source_BuildPeaks")==0?nullptr:api(name);},[](unsigned)->void*{return nullptr;});check(!unsupported.reaper.available(),"Missing peak API accepted");
         unsupported.reaper.connect([](const char*)->void*{return nullptr;},[](unsigned)->void*{return nullptr;});check(!unsupported.reaper.available(),"Missing native API functions accepted");
     }
     check(host.refs==1,"REAPER host interface reference leaked");
-    track.items.clear();selected.items.clear();root.deleteRecursively();
-    std::cout<<"Arming, play/stop boundaries, timeline anchor/recall, seek guard, native REAPER discovery, exact item placement/tail, owner track/project, cursor independence, undo and rollback passed\n";
+    track.items.clear();selected.items.clear();check(liveSources==0,"PCM source leaked");root.deleteRecursively();
+    std::cout<<"Arming, play/stop boundaries, timeline anchor/recall, seek guard, native REAPER discovery, exact item placement/tail, owner track/project, cursor independence, undo/rollback, asynchronous peak lifecycle, cache-before-insert, item refresh and cancellation passed\n";
 } catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}

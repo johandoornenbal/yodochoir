@@ -121,8 +121,13 @@ The two-minute limit measures received samples, not wall-clock time.
 ### Writing an aligned item in Reaper
 
 Save the Reaper project first, then stop transport and press **Write to track**.
-The writing phase runs rendering and WAV encoding in the background; item creation
-runs on Reaper's main thread through its native VST3 extension API. The WAV uses
+The writing phase runs rendering and WAV encoding in the background. It then
+prepares Reaper's waveform peaks in short steps on the main thread before creating
+the item. The prepared source is transferred to the take, then the item and
+arrange view are refreshed. This preserves in-memory waveform data even when
+Reaper does not save peak-cache files, and avoids waiting for a project reopen
+to populate the waveform. Peak preparation does not change audio samples or length.
+Item creation uses Reaper's native VST3 extension API. The WAV uses
 the selected output sample rate and 24-bit PCM, stored in a `YodoChoir` folder beside the project, with a unique
 filename. Its item includes the complete rendered tail and uses the recorded
 start, zero source offset, normal playback rate, seconds timebase and no automatic
@@ -264,7 +269,14 @@ resulting peak trim appears below the meters. There is no compressor or automati
 loudness boost. The meters show preview output and do not affect audio. The
 waveform is visually normalized to show phrase shape; it is not a calibrated meter.
 
-Room and timing can extend output duration. A 20 ms end fade avoids an abrupt
+The written item's length exactly matches the WAV's frame count at its output
+sample rate. The renderer reserves the longest take's duration, plus **six seconds
+when the main Room control is enabled**, plus the Timing spread allowance
+(25 ms by default, up to 60 ms). Trailing silence in a recorded take remains part
+of that take. A long item can therefore be intentional even when the final
+reverberation is quiet. This waveform fix does not shorten or trim any audio.
+
+A 20 ms end fade avoids an abrupt
 render cutoff. The first loaded take supplies the Original reference, so it can
 finish earlier than a choir using a longer second take. Prepare source clips to
 match for a useful comparison. Preview transport and A/B are basic switches;
@@ -391,6 +403,13 @@ public ABI. It verifies eight input pins and stereo output before and after
 stereo, mono, quad, 5.1 and global eight-channel host proposals, followed by bus
 activation at 96 kHz. This runs on Linux/macOS without pretending to be an actual
 Reaper session. Reaper-on-Mac integration still needs verification in the DAW.
+
+The waveform-write checks simulate multi-step peak generation, yielding between
+slices, the existing-cache fast path, memory-only peaks, transfer of the prepared
+source to the take, item refresh, source-open failure and cancellation on a changed
+track. They also check decoder cleanup and unchanged item start/length. These
+are Reaper API fixture tests; waveform appearance in an actual Reaper-on-Mac
+session still needs verification there.
 
 The workflow tests write actual editor previews and synthetic demo WAVs
 under `build/previews`. The recording suite additionally checks stereo-pair input,
