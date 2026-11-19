@@ -640,7 +640,7 @@ public:
         refresh();
     }
     void resized() override {
-        brandLogo.setBounds(22,12,260,84);
+        brandLogo.setBounds(16,18,228,76);
         tweakButton.setBounds(700,56,145,29);tweaks.setBounds(40,115,1014,565);
         sizeChoice.setBounds(864,15,190,27); reset.setBounds(864,56,190,29);
         demoButton.setBounds(446,128,119,26); cancelCaptureButton.setBounds(323,128,115,26); recordAllButton.setBounds(205,128,110,26); monitorButton.setBounds(602,320,190,26);
