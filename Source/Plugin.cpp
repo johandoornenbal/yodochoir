@@ -9,6 +9,9 @@ namespace {
 constexpr std::array<const char*,7> ids{"singers","detune","timing","width","room","output","seed"};
 constexpr std::array<const char*,6> names{"Singers","Pitch spread","Timing spread","Stereo width","Room","Output"};
 constexpr std::array<float,6> defaults{12,9,25,85,18,-3};
+constexpr std::array<const char*,6> roomIds{"roomRegen","roomDerez","roomFilter","roomEarly","roomPosition","roomWet"};
+constexpr std::array<const char*,6> roomNames{"Regen","Derez","Filter","Early reflections","Position","Dry / Wet"};
+constexpr std::array<float,6> roomDefaults{50,50,25,50,75,100};
 }
 juce::AudioProcessorValueTreeState::ParameterLayout ChoirProcessor::layout() {
     juce::AudioProcessorValueTreeState::ParameterLayout p;
@@ -20,6 +23,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout ChoirProcessor::layout() {
     p.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{"original",1},"Original first take",false));
     p.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{"loop",1},"Loop preview",false));
     p.add(std::make_unique<juce::AudioParameterBool>(juce::ParameterID{"inputMonitor",1},"Monitor routed input",false));
+    for(const auto* id:{"sampleMode","outputMode"})
+        p.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID{id,1},juce::String(id)=="sampleMode"?"Sample resolution":"Output resolution",juce::StringArray{"Project","48 kHz"},0));
+    for(size_t i=0;i<6;++i) p.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID{roomIds[i],1},juce::String("kWoodRoom ")+roomNames[i],juce::NormalisableRange<float>(0,100,.1f),roomDefaults[i]));
     return p;
 }
 ChoirProcessor::ChoirProcessor():AudioProcessor(BusesProperties().withInput("Record pairs 1-8",juce::AudioChannelSet::create7point1SDDS(),true).withOutput("Choir",juce::AudioChannelSet::stereo(),true)),
@@ -27,13 +33,20 @@ ChoirProcessor::ChoirProcessor():AudioProcessor(BusesProperties().withInput("Rec
     formats.registerBasicFormats();
     for(size_t i=0;i<ids.size();++i) values[i]=state.getRawParameterValue(ids[i]);
     original=state.getRawParameterValue("original"); loop=state.getRawParameterValue("loop"); monitor=state.getRawParameterValue("inputMonitor");
+    sampleMode=state.getRawParameterValue("sampleMode");outputMode=state.getRawParameterValue("outputMode");
+    for(size_t i=0;i<6;++i) roomValues[i]=state.getRawParameterValue(roomIds[i]);
     startThread(juce::Thread::Priority::low);startTimerHz(20);
 }
 ChoirProcessor::~ChoirProcessor() { stopTimer();armed=false;recording=false; captureSerial.fetch_add(1); signalThreadShouldExit(); requestSerial.fetch_add(1); notify(); stopThread(-1); }
 choir::Settings ChoirProcessor::settings() const {
-    return {juce::roundToInt(values[0]->load()),values[1]->load(),values[2]->load(),values[3]->load()*.01f,
+    choir::Settings result{juce::roundToInt(values[0]->load()),values[1]->load(),values[2]->load(),values[3]->load()*.01f,
             values[4]->load()*.01f,values[5]->load(),juce::roundToInt(values[6]->load())};
+    result.sourceRate=sampleResolution();result.outputRate=outputResolution();
+    for(size_t i=0;i<6;++i) result.roomParameters[i]=roomValues[i]->load()*.01f;
+    return result;
 }
+double ChoirProcessor::sampleResolution() const {return sampleMode->load()<.5f?hostRate.load():48000.;}
+double ChoirProcessor::outputResolution() const {return outputMode->load()<.5f?hostRate.load():48000.;}
 void ChoirProcessor::message(juce::String s) { const std::lock_guard<std::mutex> lock(statusMutex); messageText=std::move(s); }
 juce::String ChoirProcessor::status() const { const std::lock_guard<std::mutex> lock(statusMutex); return messageText; }
 std::array<std::shared_ptr<const choir::Take>,4> ChoirProcessor::takes() const { const std::lock_guard<std::mutex> lock(sourceMutex); return sourceBank; }
@@ -55,7 +68,7 @@ bool ChoirProcessor::loadTake(const juce::File& file,int slot) {
             double value=0; for(int c=0;c<buffer.getNumChannels();++c) value+=buffer.getSample(c,i)/buffer.getNumChannels();
             mono[static_cast<size_t>(i)]=std::isfinite(value)?static_cast<float>(std::clamp(value,-32.,32.)):0.f;
         }
-        auto take=std::make_shared<choir::Take>(); take->name=file.getFileName().toStdString(); take->mono=choir::resample(mono,reader->sampleRate); take->preview=choir::waveform(take->mono);
+        auto take=std::make_shared<choir::Take>(); take->name=file.getFileName().toStdString(); take->rate=sampleResolution();take->mono=choir::resample(mono,reader->sampleRate,take->rate); take->preview=choir::waveform(take->mono);
         { const std::lock_guard<std::mutex> lock(sourceMutex); sourceBank[static_cast<size_t>(slot)]=std::move(take); sourcesChanged(); }
         message("Take loaded. Align matching phrases at their starts, then Render choir.");
         return true;
@@ -69,7 +82,12 @@ void ChoirProcessor::clearTake(int slot) {
 }
 void ChoirProcessor::loadDemo() {
     if(captureActive() || writeBusy.load()) return;
-    auto a=choir::demo(0),b=choir::demo(1);
+    const auto makeDemo=[this](int index) {
+        auto take=std::make_shared<choir::Take>(*choir::demo(index));
+        const double target=sampleResolution();take->mono=choir::resample(take->mono,take->rate,target);take->rate=target;
+        take->preview=choir::waveform(take->mono);return take;
+    };
+    auto a=makeDemo(0),b=makeDemo(1);
     { const std::lock_guard<std::mutex> lock(sourceMutex); sourceBank={a,b,nullptr,nullptr}; sourcesChanged(); }
     message("Synthetic vowel demo loaded. Render choir to hear the ensemble.");
 }
@@ -94,7 +112,7 @@ bool ChoirProcessor::beginRecording(unsigned mask,int selectedSlot) {
     if(!std::isfinite(rate) || rate<8000 || rate>192000) { message("Record at a host sample rate between 8 and 192 kHz."); return false; }
     try {
         auto ready=std::make_unique<Capture>();
-        ready->rate=rate; ready->slot=selectedSlot; ready->mask=mask; ready->inputChannels=inputs;
+        ready->rate=rate;ready->targetRate=sampleResolution(); ready->slot=selectedSlot; ready->mask=mask; ready->inputChannels=inputs;
         for(size_t slot=0;slot<4;++slot) if(mask & (1u<<slot)) {
             ready->mono[slot].resize(static_cast<size_t>(std::floor(rate*choir::maxSeconds)),0.f);
             // JUCE reorders VST3 7.1 Music's rear/side pairs in its process buffer.
@@ -176,7 +194,7 @@ void ChoirProcessor::finalizeCapture() {
                     if(completed->serial!=captureSerial.load() || threadShouldExit()) {valid=false;break;}
                     completed->mono[slot].resize(completed->frames);
                     auto take=std::make_shared<choir::Take>(); take->name="Recorded take "+std::to_string(slot+1);take->hasTimeline=completed->hasTimeline;take->startSeconds=completed->startSeconds;
-                    take->mono=choir::resample(completed->mono[slot],completed->rate);
+                    take->rate=completed->targetRate;take->mono=choir::resample(completed->mono[slot],completed->rate,take->rate);
                     take->preview=choir::waveform(take->mono); ready[slot]=std::move(take);
                     std::vector<float>().swap(completed->mono[slot]); // Release native-rate storage off the audio thread.
                 }
@@ -228,7 +246,7 @@ void ChoirProcessor::requestWrite() {
     const auto bank=takes();bool any=false,anchored=false;double start=0;
     for(const auto& take:bank) if(take) {
         any=true;if(take->hasTimeline) {
-            if(anchored && std::abs(start-take->startSeconds)>1./choir::sampleRate) {message("Recorded takes have different timeline starts. Record an aligned pass before writing.");return;}
+            if(anchored && std::abs(start-take->startSeconds)>1./std::max(take->rate,sampleResolution())) {message("Recorded takes have different timeline starts. Record an aligned pass before writing.");return;}
             if(!anchored) {start=take->startSeconds;anchored=true;}
         }
     }
@@ -249,7 +267,7 @@ void ChoirProcessor::writeAudio() {
     if(!job) {writeBusy=false;return;}
     const auto r=rendered();
     if(r && r->revision==job->revision && r->settings==job->settings && sourceRevision.load()==job->revision && settings()==job->settings) {
-        job->length=double(r->left.size())/choir::sampleRate;
+        job->length=double(r->left.size())/r->settings.outputRate;
         job->success=saveWav(r,job->file);
     }
     if(!job->success) message("Writing could not finish. Render the current settings and try Write to track again.");
@@ -322,7 +340,7 @@ template<class T> void ChoirProcessor::process(juce::AudioBuffer<T>& b,juce::Mid
     if(!lock.isLocked() || !clip || b.getNumChannels()<2) { midi.clear(); return; }
     if(clip->revision!=sourceRevision.load() || !(clip->settings==settings())) { playing=false; midi.clear(); return; }
     if(rewind.exchange(false)) cursor=0;
-    const auto count=clip->left.size(); const double step=choir::sampleRate/hostRate.load();
+    const auto count=clip->left.size(); const double step=clip->settings.outputRate/hostRate.load();
     std::array<float,2> peak{};
     const auto renderSegment=[&](int start,int end) {
         for(int i=start;i<end;++i) {
@@ -360,14 +378,14 @@ bool ChoirProcessor::exportWav(const juce::File& file) {
     if(captureActive()) { message("Finish recording before exporting the choir."); return false; }
     const auto r=rendered(); if(!r || r->revision!=sourceRevision.load() || !(r->settings==settings())) { message("Render the current settings before exporting."); return false; }
     if(!saveWav(r,file)) {message("Cannot save the WAV. Previous file preserved.");return false;}
-    message("Exported stereo 48 kHz / 24-bit WAV: "+file.getFileName());return true;
+    message("Exported stereo "+juce::String(r->settings.outputRate/1000.,1)+" kHz / 24-bit WAV: "+file.getFileName());return true;
 }
 bool ChoirProcessor::saveWav(const std::shared_ptr<const choir::Render>& r,const juce::File& file) {
     juce::TemporaryFile temp(file);
     std::unique_ptr<juce::FileOutputStream> stream(temp.getFile().createOutputStream());
     if(!stream) return false;
     juce::WavAudioFormat wav;
-    std::unique_ptr<juce::AudioFormatWriter> writer(wav.createWriterFor(stream.get(),choir::sampleRate,2,24,{},0));
+    std::unique_ptr<juce::AudioFormatWriter> writer(wav.createWriterFor(stream.get(),r->settings.outputRate,2,24,{},0));
     if(!writer) return false;
     stream.release();
     const float* audio[]{r->left.data(),r->right.data()};
@@ -380,6 +398,7 @@ void ChoirProcessor::getStateInformation(juce::MemoryBlock& data) {
     const auto bank=takes();
     for(size_t i=0;i<bank.size();++i) if(bank[i]) {
         juce::ValueTree take{"TAKE"}; take.setProperty("slot",static_cast<int>(i),nullptr); take.setProperty("name",juce::String(bank[i]->name),nullptr);
+        take.setProperty("rate",bank[i]->rate,nullptr);
         take.setProperty("hasTimeline",bank[i]->hasTimeline,nullptr);take.setProperty("startSeconds",bank[i]->startSeconds,nullptr);
         juce::MemoryOutputStream pcm;
         for(float v:bank[i]->mono) pcm.writeFloat(v);
@@ -388,17 +407,19 @@ void ChoirProcessor::getStateInformation(juce::MemoryBlock& data) {
     juce::MemoryOutputStream out(data,false); saved.writeToStream(out);
 }
 void ChoirProcessor::setStateInformation(const void* bytes,int size) {
-    if(!bytes || size<=0 || size>128*1024*1024) return;
+    if(!bytes || size<=0 || size>512*1024*1024) return;
     auto saved=juce::ValueTree::readFromData(bytes,static_cast<size_t>(size));
     if(!saved.isValid() || !saved.hasType("YodoChoirState") || static_cast<int>(saved.getProperty("schema",0))!=1) return;
     std::array<std::shared_ptr<const choir::Take>,4> bank{};
     for(int i=saved.getNumChildren();--i>=0;) {
         auto node=saved.getChild(i); if(!node.hasType("TAKE")) continue;
         const int slot=static_cast<int>(node.getProperty("slot",-1)); const auto* pcm=node.getProperty("pcm").getBinaryData();
+        const double takeRate=static_cast<double>(node.getProperty("rate",48000.));
+        if(!std::isfinite(takeRate) || takeRate<8000 || takeRate>192000) return;
         if(slot<0 || slot>=4 || bank[static_cast<size_t>(slot)] || !pcm || pcm->getSize()<8 || pcm->getSize()%4!=0
-           || pcm->getSize()>static_cast<size_t>(choir::sampleRate*choir::maxSeconds*4)) return;
+           || pcm->getSize()>static_cast<size_t>(takeRate*choir::maxSeconds*4)) return;
         auto take=std::make_shared<choir::Take>(); take->name=node.getProperty("name").toString().substring(0,256).toStdString();
-        take->hasTimeline=static_cast<bool>(node.getProperty("hasTimeline",false));take->startSeconds=static_cast<double>(node.getProperty("startSeconds",0.));
+        take->rate=takeRate;take->hasTimeline=static_cast<bool>(node.getProperty("hasTimeline",false));take->startSeconds=static_cast<double>(node.getProperty("startSeconds",0.));
         if(take->hasTimeline && !std::isfinite(take->startSeconds)) return;
         juce::MemoryInputStream input(*pcm,false); take->mono.resize(pcm->getSize()/4);
         for(auto& v:take->mono) { v=input.readFloat(); if(!std::isfinite(v) || std::abs(v)>32.f) return; }
@@ -420,9 +441,71 @@ void ChoirProcessor::setStateInformation(const void* bytes,int size) {
     message("Session takes restored. Rebuilding choir..."); requestRender();
 }
 
+class TweakPanel final : public juce::Component {
+public:
+    explicit TweakPanel(ChoirProcessor& p):processor(p) {
+        setComponentID("tweakPane");
+        for(size_t i=0;i<2;++i) {
+            auto& choice=rates[i];addAndMakeVisible(choice);
+            choice.setComponentID(i==0?"sampleResolution":"outputResolution");
+            choice.addItemList({"Project","48 kHz"},1);
+            choice.setColour(juce::ComboBox::backgroundColourId,style::ink);
+            choice.setColour(juce::ComboBox::textColourId,style::gold);
+            rateAttachments[i]=std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(processor.state,i==0?"sampleMode":"outputMode",choice);
+        }
+        rates[0].setTooltip("Project follows the host sample rate. 48 kHz lowers new imports/captures and source processing. Existing takes retain their stored quality; render again after changing.");
+        rates[1].setTooltip("Render, preview, exported WAV and Write to track use this rate. Project follows the host (for example 96 kHz). Render again after changing.");
+        for(size_t i=0;i<6;++i) {
+            auto& dial=knobs[i];addAndMakeVisible(dial);dial.setComponentID(roomIds[i]);
+            dial.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+            dial.setRotaryParameters(juce::MathConstants<float>::pi*1.25f,juce::MathConstants<float>::pi*2.75f,true);
+            dial.setTextBoxStyle(juce::Slider::TextBoxBelow,false,130,24);
+            attachments[i]=std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.state,roomIds[i],dial);
+            dial.setDoubleClickReturnValue(true,roomDefaults[i]);dial.setTextValueSuffix(" %");
+            dial.setTooltip(juce::String("Native Airwindows kWoodRoom ")+roomNames[i]+". Render again after changing; double-click restores the default.");
+        }
+        addAndMakeVisible(reset);reset.setComponentID("resetRoom");
+        reset.onClick=[this]{for(size_t i=0;i<6;++i) {
+            auto* param=processor.state.getParameter(roomIds[i]);param->beginChangeGesture();
+            param->setValueNotifyingHost(param->getDefaultValue());param->endChangeGesture();
+        }};
+    }
+    void refresh() {
+        const auto project=juce::String(processor.projectResolution()/1000.,1);
+        for(auto& choice:rates) {choice.changeItemText(1,"Project ("+project+" kHz)");choice.setEnabled(!processor.captureActive() && !processor.isWriting());}
+        for(auto& dial:knobs) dial.setEnabled(!processor.isWriting());
+        reset.setEnabled(!processor.isWriting());
+        repaint();
+    }
+    void paint(juce::Graphics& g) override {
+        g.setColour(style::ink);g.fillRoundedRectangle(getLocalBounds().toFloat(),10);
+        g.setColour(style::gold);g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(1),10,1);
+        g.setFont(juce::FontOptions(22.f));g.drawText("TWEAKS",30,18,900,34,juce::Justification::centredLeft);
+        g.setColour(style::cream);g.setFont(juce::FontOptions(14.f));
+        g.drawText("Sample resolution",50,75,400,24,juce::Justification::centredLeft);
+        g.drawText("Output resolution",530,75,400,24,juce::Justification::centredLeft);
+        g.setFont(juce::FontOptions(12.f));
+        g.drawText("Project follows the DAW sample rate. Re-render after changing rates or room controls.",50,145,910,25,juce::Justification::centredLeft);
+        g.setColour(style::gold);g.drawText("AIRWINDOWS kWoodRoom",50,187,700,27,juce::Justification::centredLeft);
+        for(size_t i=0;i<6;++i) g.drawText(roomNames[i],40+static_cast<int>(i%3)*325,230+static_cast<int>(i/3)*150,285,25,juce::Justification::centred);
+        g.setColour(style::cream);g.drawText("Main Room blends this return with the choir. Native processing is unchanged.",50,535,920,25,juce::Justification::centredLeft);
+    }
+    void resized() override {
+        rates[0].setBounds(50,105,420,30);rates[1].setBounds(530,105,420,30);
+        reset.setBounds(770,185,180,28);
+        for(size_t i=0;i<6;++i) knobs[i].setBounds(80+static_cast<int>(i%3)*325,255+static_cast<int>(i/3)*150,205,120);
+    }
+private:
+    ChoirProcessor& processor;
+    std::array<juce::ComboBox,2> rates;
+    std::array<juce::Slider,6> knobs;
+    juce::TextButton reset{"RESET ROOM"};
+    std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>,6> attachments;
+    std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>,2> rateAttachments;
+};
 class ChoirPanel final : public juce::Component,public juce::FileDragAndDropTarget,private juce::Timer {
 public:
-    explicit ChoirPanel(ChoirProcessor& p):processor(p) {
+    explicit ChoirPanel(ChoirProcessor& p):processor(p),tweaks(p) {
         setLookAndFeel(&look);
         for(size_t i=0;i<4;++i) {
             addAndMakeVisible(load[i]); addAndMakeVisible(clear[i]); addAndMakeVisible(recordButtons[i]);
@@ -449,7 +532,7 @@ public:
         knobs[1].setTooltip("Maximum independent pitch spread in cents, plus slow drift. Duration-preserving granular processing; not a learned singer model.");
         knobs[2].setTooltip("Maximum onset spread in milliseconds. Use aligned recordings of the same phrase.");
         knobs[3].setTooltip("Stereo placement of the singers. 0% centres the dry ensemble; Room can add stereo reflections.");
-        knobs[4].setTooltip("Airwindows kWoodRoom at native defaults, with its native Dry/Wet at 100%. This knob blends the room return outside the unchanged DSP; 0% removes it and its six-second tail.");
+        knobs[4].setTooltip("Blend the kWoodRoom return outside the unchanged Airwindows DSP. Open Tweaks for its six native controls. 0% removes the return and its six-second tail.");
         knobs[5].setTooltip("Output gain baked into the next render and exported WAV. Re-render after changing.");
         for(auto* button:{&renderButton,&preview,&stopButton,&ab,&exportButton,&demoButton,&variation,&reset,&loopButton,&monitorButton,&cancelCaptureButton,&recordAllButton,&writeButton}) {
             addAndMakeVisible(*button); button->setColour(juce::TextButton::buttonColourId,style::ink);
@@ -482,13 +565,16 @@ public:
         loopAttachment=std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment>(processor.state,"loop",loopButton);
         ab.setTooltip("Compare the first loaded take with the stereo choir at the same phrase position. This is not LUFS level matching.");
         preview.setTooltip("Preview needs an active audio device/DAW callback. Any MIDI Note On also restarts the phrase at its original pitch.");
-        exportButton.setTooltip("Save the current choir as stereo 48 kHz / 24-bit WAV, including its room tail. Original A/B does not change the export.");
+        exportButton.setTooltip("Save the current choir as stereo WAV at the selected output resolution / 24-bit, including its room tail. Original A/B does not change the export.");
         addAndMakeVisible(sizeChoice); sizeChoice.setComponentID("uiSize"); sizeChoice.addItemList({"Small (75%)","Medium (100%)","Large (125%)"},1);
         sizeChoice.setColour(juce::ComboBox::backgroundColourId,style::ink); sizeChoice.setColour(juce::ComboBox::textColourId,style::gold);
         sizeChoice.setSelectedId(processor.uiSize.load(),juce::dontSendNotification);
         sizeChoice.onChange=[this]{processor.uiSize=sizeChoice.getSelectedId(); processor.updateHostDisplay(juce::AudioProcessor::ChangeDetails{}.withNonParameterStateChanged(true)); if(sizeChanged) sizeChanged();};
         addAndMakeVisible(leftMeter); addAndMakeVisible(rightMeter); addAndMakeVisible(statusLabel);
         statusLabel.setColour(juce::Label::textColourId,style::cream.withAlpha(.8f)); statusLabel.setFont(juce::FontOptions(12.f));
+        addAndMakeVisible(tweakButton);tweakButton.setComponentID("tweaks");
+        tweakButton.setClickingTogglesState(true);addChildComponent(tweaks);
+        tweakButton.onClick=[this]{tweaks.setVisible(tweakButton.getToggleState());tweaks.toFront(false);tweakButton.setButtonText(tweakButton.getToggleState()?"CLOSE TWEAKS":"TWEAKS");};
         setSize(1100,820); refresh(); startTimerHz(30);
     }
     ~ChoirPanel() override { stopTimer(); setLookAndFeel(nullptr); }
@@ -503,6 +589,7 @@ public:
         refresh();
     }
     void resized() override {
+        tweakButton.setBounds(700,56,145,29);tweaks.setBounds(40,115,1014,565);
         sizeChoice.setBounds(864,15,190,27); reset.setBounds(864,56,190,29);
         demoButton.setBounds(446,128,119,26); cancelCaptureButton.setBounds(323,128,115,26); recordAllButton.setBounds(205,128,110,26); monitorButton.setBounds(602,320,190,26);
         for(int i=0;i<4;++i) { load[static_cast<size_t>(i)].setBounds(46,164+i*45,404,36); recordButtons[static_cast<size_t>(i)].setBounds(458,164+i*45,60,36); clear[static_cast<size_t>(i)].setBounds(525,164+i*45,40,36); }
@@ -518,7 +605,7 @@ public:
         g.fillAll(cream); g.setColour(ink); g.setFont(juce::FontOptions(11.f));
         g.drawText("YODO AUDIO    /    PHRASE ENSEMBLE",32,15,650,22,juce::Justification::left);
         g.setFont(juce::FontOptions(40.f)); g.drawText("YodoChoir",30,42,300,55,juce::Justification::left);
-        g.setFont(juce::FontOptions(12.f)); g.drawText("S T U D I O   /   P R O T O T Y P E  0 4",290,68,500,20,juce::Justification::left);
+        g.setFont(juce::FontOptions(12.f)); g.drawText("S T U D I O   /   P R O T O T Y P E  0 5",290,68,500,20,juce::Justification::left);
         g.setGradientFill(juce::ColourGradient(juce::Colour(0xff343d36),0,108,juce::Colour(0xff19221d),0,780,false));
         g.fillRoundedRectangle(16,108,1068,674,16); g.setColour(gold.withAlpha(.25f)); g.drawRoundedRectangle({17.f,109.f,1066.f,672.f},15,1);
         for(float x:{30.f,1070.f}) for(float y:{122.f,768.f}) {g.setColour(ink.darker());g.fillEllipse(x-4,y-4,8,8);g.setColour(muted);g.drawLine(x-2,y+1,x+2,y-1,1);}
@@ -527,7 +614,7 @@ public:
         g.setColour(cream.withAlpha(.55f)); g.setFont(juce::FontOptions(11.f));
         g.drawText("WAV / AIFF / FLAC  /  DROP FILES HERE  /  120 s PER TAKE",46,348,530,22,juce::Justification::left);
         const auto r=processor.rendered();
-        g.drawText(processor.captureActive()?juce::String("HOST INPUT / MONO TAKES / 120 s MAX"):r?juce::String(r->settings.singers)+" SINGERS  /  48 kHz  /  PEAK TRIM "+juce::String(r->peakTrimDb,1)+" dB":"LOCAL RENDERING  /  NO VOICE MODEL REQUIRED",602,347,434,26,juce::Justification::centred);
+        g.drawText(processor.captureActive()?juce::String("HOST INPUT / MONO TAKES / 120 s MAX"):r?juce::String(r->settings.singers)+" SINGERS  /  "+juce::String(r->settings.outputRate/1000.,1)+" kHz  /  PEAK TRIM "+juce::String(r->peakTrimDb,1)+" dB":"LOCAL RENDERING  /  NO VOICE MODEL REQUIRED",602,347,434,26,juce::Justification::centred);
         g.setColour(juce::Colour(0xff111b16)); g.fillRoundedRectangle(46,385,990,83,7);
         g.setColour(gold.withAlpha(.12f)); g.drawHorizontalLine(426,55,1027);
         choir::Waveform wave{};
@@ -577,11 +664,12 @@ private:
             });
     }
     void refresh() {
+        tweaks.refresh();
         const auto bank=processor.takes();
         for(size_t i=0;i<4;++i) {
             const int first=processor.getTotalNumInputChannels()<=2?1:static_cast<int>(i)*2+1;
             const auto pair=juce::String(first)+"/"+juce::String(first+1)+"  /  ";
-            const auto label=pair+(bank[i]?juce::String(bank[i]->name)+"  /  "+juce::String(double(bank[i]->mono.size())/choir::sampleRate,1)+" s":"Load vocal take "+juce::String(static_cast<int>(i+1))+"...");
+            const auto label=pair+(bank[i]?juce::String(bank[i]->name)+"  /  "+juce::String(double(bank[i]->mono.size())/bank[i]->rate,1)+" s":"Load vocal take "+juce::String(static_cast<int>(i+1))+"...");
             const bool capturing=processor.captureActive(),activeSlot=processor.recordingSlot()==static_cast<int>(i) || processor.recordingSlot()==-2;
             const auto seconds=static_cast<int>(processor.recordingSeconds());
             load[i].setButtonText(capturing && activeSlot?pair+(processor.isArmed()?"Armed ":processor.isRecording()?"Recording ":"Saving recording ")+juce::String(seconds/60)+":"+juce::String(seconds%60).paddedLeft('0',2)+" / 2:00":label);
@@ -612,6 +700,8 @@ private:
     }
     ChoirProcessor& processor;
     style::Look look;
+    TweakPanel tweaks;
+    juce::TextButton tweakButton{"TWEAKS"};
     std::array<juce::TextButton,4> load,clear,recordButtons;
     std::array<juce::Slider,6> knobs;
     std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>,6> attachments;

@@ -19,7 +19,8 @@ double read(const std::vector<float>& data,double pos) {
 }
 bool Settings::operator==(const Settings& b) const {
     return singers==b.singers && detune==b.detune && timing==b.timing && width==b.width
-        && room==b.room && outputDb==b.outputDb && seed==b.seed;
+        && room==b.room && outputDb==b.outputDb && seed==b.seed
+        && sourceRate==b.sourceRate && outputRate==b.outputRate && roomParameters==b.roomParameters;
 }
 Waveform waveform(const std::vector<float>& data) {
     Waveform result{};
@@ -29,14 +30,15 @@ Waveform waveform(const std::vector<float>& data) {
     }
     return result;
 }
-std::vector<float> resample(const std::vector<float>& in,double rate) {
-    if(in.empty() || !std::isfinite(rate) || rate<8000 || rate>192000) throw std::invalid_argument("Unsupported audio sample rate");
+std::vector<float> resample(const std::vector<float>& in,double rate,double targetRate) {
+    if(in.empty() || !std::isfinite(rate) || rate<8000 || rate>192000 || !std::isfinite(targetRate) || targetRate<8000 || targetRate>192000) throw std::invalid_argument("Unsupported audio sample rate");
     if(double(in.size())/rate>maxSeconds+.001) throw std::invalid_argument("Each take must be 120 seconds or shorter");
-    if(rate==sampleRate) return in;
-    const size_t length=static_cast<size_t>(std::llround(double(in.size())*sampleRate/rate));
+    if(rate==targetRate) return in;
+    const size_t length=static_cast<size_t>(std::llround(double(in.size())*targetRate/rate));
     std::vector<float> out(length);
-    const double step=rate/sampleRate,cutoff=std::min(1.,1./step)*.95;
-    constexpr int radius=16;
+    const double step=rate/targetRate,cutoff=std::min(1.,1./step)*.95;
+    // Keep the same transition width in destination samples when downsampling.
+    const int radius=static_cast<int>(std::ceil(16*std::max(1.,step)));
     for(size_t i=0;i<length;++i) {
         const double pos=double(i)*step; const int base=static_cast<int>(pos);
         double sum=0,weight=0;
@@ -70,47 +72,62 @@ std::shared_ptr<const Take> demo(int variation) {
 }
 std::unique_ptr<Render> render(const std::array<std::shared_ptr<const Take>,slots>& bank,Settings s,
                              const std::function<bool()>& cancel,const std::function<void(float)>& progress) {
+    if(!std::isfinite(s.sourceRate) || s.sourceRate<8000 || s.sourceRate>192000
+        || !std::isfinite(s.outputRate) || s.outputRate<8000 || s.outputRate>192000)
+        throw std::invalid_argument("Unsupported render sample rate");
+    for(float v:s.roomParameters) if(!std::isfinite(v) || v<0 || v>1) throw std::invalid_argument("Invalid room parameter");
+    const double rate=s.outputRate;
     std::vector<std::shared_ptr<const Take>> sources;
     size_t longest=0;
     for(const auto& t:bank) if(t && !t->mono.empty()) {
-        if(t->mono.size()>static_cast<size_t>(sampleRate*maxSeconds)) throw std::invalid_argument("Take too long");
+        if(cancel && cancel()) return {};
+        if(!std::isfinite(t->rate) || t->rate<8000 || t->rate>192000 || double(t->mono.size())/t->rate>maxSeconds+.001) throw std::invalid_argument("Take too long");
         for(float v:t->mono) if(!std::isfinite(v)) throw std::invalid_argument("Non-finite source audio");
-        sources.push_back(t); longest=std::max(longest,t->mono.size());
+        if(t->rate==s.sourceRate && t->rate==rate) sources.push_back(t);
+        else {
+            auto converted=std::make_shared<Take>();
+            converted->name=t->name;converted->hasTimeline=t->hasTimeline;converted->startSeconds=t->startSeconds;
+            auto samples=resample(t->mono,t->rate,s.sourceRate);
+            if(cancel && cancel()) return {};
+            converted->mono=s.sourceRate==rate?std::move(samples):resample(samples,s.sourceRate,rate);converted->rate=rate;
+            sources.push_back(std::move(converted));
+        }
+        longest=std::max(longest,sources.back()->mono.size());
     }
     if(sources.empty()) throw std::invalid_argument("Load at least one vocal take first");
     if(s.singers<1 || s.singers>32 || !std::isfinite(s.detune) || s.detune<0 || s.detune>25
         || !std::isfinite(s.timing) || s.timing<0 || s.timing>60 || !std::isfinite(s.width) || s.width<0 || s.width>1
         || !std::isfinite(s.room) || s.room<0 || s.room>.5f || !std::isfinite(s.outputDb) || s.outputDb<-24 || s.outputDb>0)
         throw std::invalid_argument("Invalid ensemble settings");
-    const size_t tail=s.room>0?sampleRate*6:0;
-    const size_t count=longest+static_cast<size_t>(std::ceil(s.timing*.001*sampleRate))+tail;
+    const size_t tail=s.room>0?static_cast<size_t>(std::llround(rate*6)):0;
+    const size_t count=longest+static_cast<size_t>(std::ceil(s.timing*.001*rate))+tail;
     auto result=std::make_unique<Render>(); result->settings=s;
     for(const auto& take:sources) if(take->hasTimeline) {
-        if(result->hasTimeline && std::abs(result->startSeconds-take->startSeconds)>1./sampleRate) result->mixedStarts=true;
+        if(result->hasTimeline && std::abs(result->startSeconds-take->startSeconds)>1./rate) result->mixedStarts=true;
         if(!result->hasTimeline) {result->hasTimeline=true;result->startSeconds=take->startSeconds;}
     }
     result->left.resize(count); result->right.resize(count); result->dry.resize(count);
     std::copy(sources[0]->mono.begin(),sources[0]->mono.end(),result->dry.begin());
     Random rng{static_cast<uint32_t>(s.seed)^0xa5f179b3u};
-    constexpr int hop=1200,window=hop*2; // 50 ms Hann windows, 50% overlap.
-    std::array<double,hop> hann{};
+    const int hop=static_cast<int>(std::llround(rate*.025)),window=hop*2; // 50 ms Hann windows, 50% overlap.
+    std::vector<double> hann(static_cast<size_t>(hop));
     for(int i=0;i<hop;++i) hann[static_cast<size_t>(i)]=.5-.5*std::cos(2*pi*i/window);
     for(int v=0;v<s.singers;++v) {
         const auto& source=sources[static_cast<size_t>(v)%sources.size()]->mono;
         const double detune=s.singers==1?0.:(rng.next()*2.-1.)*s.detune;
-        const double delay=s.singers==1?0.:rng.next()*s.timing*.001*sampleRate;
+        const double delay=s.singers==1?0.:rng.next()*s.timing*.001*rate;
         const double pan=(s.singers==1?0.:2.*v/(s.singers-1)-1.)*s.width;
         const double gain=1./std::sqrt(double(s.singers));
         const double gainL=std::cos((pan+1.)*pi/4.)*std::sqrt(2.)*gain;
         const double gainR=std::sin((pan+1.)*pi/4.)*std::sqrt(2.)*gain;
         const double phase=rng.next()*2*pi,driftRate=.13+.16*rng.next();
-        const double cutoff=5200+5500*rng.next(),alpha=1.-std::exp(-2*pi*cutoff/sampleRate);
+        const double cutoff=5200+5500*rng.next(),alpha=1.-std::exp(-2*pi*cutoff/rate);
         double low=0;
         const size_t end=std::min(count,source.size()+static_cast<size_t>(delay)+window);
         std::vector<double> ratios(end/hop+3);
         for(size_t g=0;g<ratios.size();++g) {
             const double centre=double(g)*hop;
-            const double cents=detune+std::min(2.f,s.detune*.2f)*std::sin(2*pi*driftRate*centre/sampleRate+phase);
+            const double cents=detune+std::min(2.f,s.detune*.2f)*std::sin(2*pi*driftRate*centre/rate+phase);
             ratios[g]=std::pow(2.,cents/1200.);
         }
         for(size_t i=0;i<end;++i) {
@@ -135,9 +152,8 @@ std::unique_ptr<Render> render(const std::array<std::shared_ptr<const Take>,slot
         if(progress) progress(.85f*static_cast<float>(v+1)/static_cast<float>(s.singers));
     }
     if(s.room>0) {
-        auto room=std::make_unique<kWoodRoomEngine>();room->reset(sampleRate);
-        constexpr std::array<float,6> nativeDefaults{.5f,.5f,.25f,.5f,.75f,1.f};
-        for(int i=0;i<6;++i) room->setParameter(i,nativeDefaults[static_cast<size_t>(i)]);
+        auto room=std::make_unique<kWoodRoomEngine>();room->reset(rate);
+        for(int i=0;i<6;++i) room->setParameter(i,s.roomParameters[static_cast<size_t>(i)]);
         std::array<float,256> wetL{},wetR{};
         for(size_t offset=0;offset<count;offset+=wetL.size()) {
             if(cancel && cancel()) return {};
@@ -152,7 +168,7 @@ std::unique_ptr<Render> render(const std::array<std::shared_ptr<const Take>,slot
     }
     if(progress) progress(.95f);
     float peak=0;
-    const size_t fade=std::min(count/2,static_cast<size_t>(sampleRate/50));
+    const size_t fade=std::min(count/2,static_cast<size_t>(rate/50));
     for(size_t i=0;i<count;++i) {
         const float ramp=i>=count-fade?static_cast<float>(count-1-i)/static_cast<float>(fade):1.f;
         result->left[i]*=ramp; result->right[i]*=ramp;

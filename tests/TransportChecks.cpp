@@ -78,18 +78,18 @@ int main() try {
     owning.file=root.getChildFile("Target.rpp");other.file=root.getChildFile("Other.rpp");owning.file.replaceWithText("test project fixture");other.file.replaceWithText("test project fixture");
     Host host;
     {
-        ChoirProcessor p;TestTransport head;head.sample=48000*37+17;p.setPlayHead(&head);p.prepareToPlay(48000,513);
+        ChoirProcessor p;TestTransport head;head.rate=96000;head.sample=96000*37+17;p.setPlayHead(&head);p.prepareToPlay(96000,513);
         p.getVST3ClientExtensions()->setIHostApplication(&host);check(p.reaper.available() && host.refs==2,"Native REAPER API discovery/refcount failed");
         check(p.startRecordingAll() && p.isArmed() && !p.isRecording(),"REC did not only arm");
         {
             std::unique_ptr<juce::AudioProcessorEditor> editor(p.createEditor());
             const auto preview=root.getParentDirectory().getChildFile("ui-armed.png");
-            auto stream=preview.createOutputStream();check(bool(stream),"Cannot save armed preview");
+            auto stream=preview.createOutputStream();check(bool(stream),"Cannot save armed preview");stream->setPosition(0);stream->truncate();
             juce::PNGImageFormat png;check(png.writeImageToStream(editor->createComponentSnapshot(editor->getLocalBounds(),true),*stream),"Cannot encode armed preview");
         }
         process(p,head,256);process(p,head,256);
         check(p.isArmed() && p.recordingSeconds()==0. && !p.takes()[0],"Stopped transport was captured");
-        head.moving=true;owning.playing=true;const double origin=double(head.sample)/48000.;
+        head.moving=true;owning.playing=true;const double origin=double(head.sample)/96000.;
         process(p,head,97);process(p,head,513);check(p.isRecording() && !p.isArmed(),"Transport Play did not start capture");
         head.moving=false;owning.playing=false;head.sample=0;process(p,head,256);wait([&]{return !p.captureActive();});
         for(const auto& t:p.takes())check(t && t->mono.size()==610 && t->hasTimeline && t->startSeconds==origin,"Transport boundary/start position was not preserved");
@@ -98,13 +98,16 @@ int main() try {
         check(track.items.size()==1 && selected.items.empty(),"Write did not target the plugin's own track");
         auto& item=*track.items[0];const auto r=p.rendered();
         check(std::abs(item.values["D_POSITION"]-origin)<1.e-12 && item.values["D_POSITION"]!=owning.cursor,"Write used the later cursor instead of captured start");
-        check(item.values["D_LENGTH"]==double(r->left.size())/48000. && item.values["D_LENGTH"]>6.,"Writing truncated the room tail");
+        check(item.values["D_LENGTH"]==double(r->left.size())/96000. && item.values["D_LENGTH"]>6.,"Writing truncated the room tail");
         check(item.values["D_FADEINLEN"]==0 && item.values["D_FADEOUTLEN"]==0 && item.take->values["D_STARTOFFS"]==0 && item.take->values["D_PLAYRATE"]==1,"Host defaults shifted/trimmed the written audio");
         check(juce::File(item.take->source->path).getParentDirectory()==root.getChildFile("YodoChoir"),"WAV is outside the owning project media folder");
+        juce::AudioFormatManager formats;formats.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> printed(formats.createReaderFor(juce::File(item.take->source->path)));
+        check(printed && printed->sampleRate==96000 && printed->lengthInSamples==static_cast<juce::int64>(r->left.size()),"Track print did not follow 96k project resolution");printed.reset();
         check(begins==1 && ends==1 && undoProject==&owning,"Item write is not one project-specific undo step");
         check(p.state.getRawParameterValue("inputMonitor")->load()==1,"Track audio was left silent after writing");
         juce::MemoryBlock bytes;p.getStateInformation(bytes);
-        ChoirProcessor recalled;recalled.setStateInformation(bytes.getData(),static_cast<int>(bytes.getSize()));wait([&]{return recalled.current() && !recalled.busy.load();});
+        ChoirProcessor recalled;recalled.prepareToPlay(96000,513);recalled.setStateInformation(bytes.getData(),static_cast<int>(bytes.getSize()));wait([&]{return recalled.current() && !recalled.busy.load();});
         check(recalled.takes()[0]->hasTimeline && recalled.rendered()->startSeconds==origin,"Session lost the placement anchor");
         // Reaper can stop without sending another process callback. Its API
         // must finalize capture, including in a not-yet-saved project.

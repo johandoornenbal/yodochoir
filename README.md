@@ -16,7 +16,7 @@ identities or translate lyrics. You supply the performance and words.
 
 1. Load one to four mono or stereo WAV, AIFF or FLAC vocal takes, or drag files
    onto empty slots. Each can be up to **two minutes (120 seconds)**, at 8–192 kHz. Stereo sources
-   are summed to mono; imports are resampled to a canonical 48 kHz.
+   are summed to mono; imports follow the project sample rate by default.
 2. Start with dry recordings of the same phrase, aligned at their starts. Different
    performances of the same phrase generally give more variety than one duplicated
    take. Leading silence and differences in phrasing remain in the result.
@@ -24,7 +24,7 @@ identities or translate lyrics. You supply the performance and words.
    **Room** and **Output**, then press **Render choir**.
 4. Press **Preview**. **A: Original take / B: Choir** compares the first loaded
    take with the choir at the same timeline position. It is not LUFS matching.
-5. **Export WAV** saves stereo **48 kHz / 24-bit PCM**, including the room tail
+5. **Export WAV** saves stereo **24-bit PCM at the selected output sample rate**, including the room tail
    and rendered Output gain. Import the file into your audio track.
 
 **Load demo** replaces the source slots with two mathematically generated “ah” vowels. They are clearly
@@ -111,8 +111,8 @@ The two-minute limit measures received samples, not wall-clock time.
 
 Save the Reaper project first, then stop transport and press **Write to track**.
 The writing phase runs rendering and WAV encoding in the background; item creation
-runs on Reaper's main thread through its native VST3 extension API. The WAV is
-48 kHz / 24-bit PCM, stored in a `YodoChoir` folder beside the project, with a unique
+runs on Reaper's main thread through its native VST3 extension API. The WAV uses
+the selected output sample rate and 24-bit PCM, stored in a `YodoChoir` folder beside the project, with a unique
 filename. Its item includes the complete rendered tail and uses the recorded
 start, zero source offset, normal playback rate, seconds timebase and no automatic
 item-edge fades. The choir's intentional singer onset offsets remain unchanged.
@@ -147,18 +147,59 @@ use the normal DAW Play and Stop buttons.
 
 Both imported and directly recorded takes now support **120 seconds each**.
 Recorded mono/stereo inputs at 8–192 kHz are summed to mono and converted to the
-same canonical 48 kHz format used by imported files. The original take is retained
+selected sample resolution, just like imported files. The original take is retained
 if preparation fails or recording is cancelled. Buffers are allocated before
 recording starts; the audio callback does not grow them or write files.
 
 This version uses bounded memory and embedded samples rather than unlimited disk
-streaming. Four full-length takes add roughly **92 MB** of source PCM to a saved state before host encoding,
+streaming. Four full-length takes add roughly **184 MB at 96 kHz** (92 MB at 48 kHz, 369 MB at 192 kHz) of source PCM to a saved state before host encoding,
 plus temporary capture/render memory. A four-pair pass reserves roughly 92 MB at
-48 kHz or 369 MB at 192 kHz before recording; capture and rendering are bounded
+48 kHz, 184 MB at 96 kHz or 369 MB at 192 kHz before recording; capture and rendering are bounded
 rather than disk-streamed. Finish recording before saving: an in-progress
 capture is not included in the session until committed. Existing embedded takes
 continue to be saved during capture. Truly unlimited recording would need disk-backed
 capture, long-file rendering and an external-media/session-management workflow.
+
+## Tweaks: resolution and kWoodRoom
+
+Press **TWEAKS** to open the pane; **CLOSE TWEAKS** returns to the main interface.
+Both resolution selectors default to **Project**, following the sample rate the
+DAW supplies to the plugin. A 96 kHz project therefore records/imports samples,
+renders the choir and exports/prints WAVs at 96 kHz. These settings control sample
+rate, not bit depth: embedded samples remain float PCM and WAV output remains
+24-bit PCM. Before the host supplies a rate, the fallback is 48 kHz.
+
+| Setting | Options | Effect |
+| --- | --- | --- |
+| Sample resolution | Project (default), 48 kHz | Rate for new imported/recorded takes and source processing during rendering |
+| Output resolution | Project (default), 48 kHz | Choir rendering, room processing, preview source, exported WAV and Write to track |
+
+The choices are independent: keep 96 kHz samples and export at 48 kHz, or process
+samples at 48 kHz while rendering at the project's 96 kHz. DAW output callbacks
+always run at the host rate; preview is resampled when necessary. Changing the
+project rate or either setting makes an earlier render stale: **render again**.
+Rate changes preserve phrase duration, timeline placement and the six-second room
+tail. Lower sample rates use sinc filtering to avoid aliasing.
+
+Existing stored takes retain their original rate and samples when you change a
+selector; the renderer converts a temporary copy. Selecting 48 kHz for samples
+affects new imports/captures and lowers source processing on the next render.
+Switching back cannot recover frequencies absent from a take originally stored at
+48 kHz. The capture's storage rate is fixed when armed, so a host change during
+capture finalizes the partial take at its previous rate. Sessions store each take's
+rate, both choices and the native room parameters. Older sessions' embedded takes
+are recognized as 48 kHz; missing new controls use their defaults.
+
+The pane exposes all six native **kWoodRoom** parameters (0–100%): **Regen**,
+**Derez**, **Filter**, **Early reflections**, **Position**, and **Dry / Wet**.
+**RESET ROOM** restores 50%, 50%, 25%, 50%, 75%, 100%; double-clicking one dial
+restores that dial. The main **Room** knob still blends the room return with the
+choir outside Airwindows processing. At native Dry/Wet 100% the return is fully
+wet; lowering it also puts dry audio in that return, following Airwindows' native
+behavior. Render again after changing these controls. The Airwindows DSP source
+is unchanged; its existing sample-rate and parameter APIs are used directly.
+
+![YodoChoir Tweaks pane](docs/ui-tweaks.png)
 
 ## DAW preview
 
@@ -198,13 +239,13 @@ rendering; destroying the plugin cancels and joins its worker.
 
 Pitch movement uses overlapping 50 ms Hann grains, keeping overall phrase duration
 instead of changing playback speed. A small per-singer high-frequency variation
-adds further differences. The Room stage uses **Airwindows kWoodRoom**, with native
+adds further differences. The Room stage uses **Airwindows kWoodRoom**, initially set to
 Regen 50%, Derez 50%, Filter 25%, Early RF 50%, Position 75%, and native Dry/Wet
-100%. YodoChoir blends that fully wet return with the choir using its Room knob,
+100%. All six native controls are available in Tweaks. YodoChoir blends that return with the choir using its main Room knob,
 outside the unchanged Airwindows processing. A six-second render tail and the
 existing final fade bound the offline output; this is not a claim that the native
 reverb always decays completely within six seconds. Sinc interpolation handles import sample-rate conversion;
-rendered preview uses linear interpolation when the host is not at 48 kHz.
+rendered preview uses linear interpolation when the output rate differs from the host rate.
 
 The dry ensemble scales with singer count. An offline peak scan attenuates the
 choir only when needed to stay below 0.94 full scale **before Output gain**; the
@@ -220,10 +261,10 @@ phrase-edge or A/B clicks on abrupt source material are possible in this prototy
 
 ## Session recall
 
-Sources are **embedded** as lossless 48 kHz float PCM with the controls, seed,
+Sources are **embedded** as lossless float PCM at each take's stored sample rate, with the controls, seed,
 A/B/loop preference and interface size. Original file paths are not required on
 another machine. Rendered audio is not duplicated in the session; it is rebuilt
-in the background on load. Four maximum-length takes can add roughly 92 MB to a
+in the background on load. Four maximum-length takes at 96 kHz can add roughly 184 MB to a
 DAW state. Save/export as usual and allow the render to finish after reopening.
 
 Choose Small (75%), Medium (100%) or Large (125%) at the top right. All controls
@@ -292,7 +333,7 @@ cmake --build build --parallel 3
 ctest --test-dir build --output-on-failure
 ```
 
-The six suites cover deterministic ensemble rendering, variation, stereo and
+The seven suites cover deterministic ensemble rendering, variation, stereo and
 mono behaviour, source-rate conversion, extreme controls, headroom, cancellation,
 file import and limits, MIDI event offsets, Original/Choir preview, float/double
 host playback, export samples/format, embedded-source session recall, stale-render
@@ -324,6 +365,15 @@ seek handling, suspended-callback Stop, unsaved-project protection, destination
 ownership, cursor independence, retained room tail,
 undo and insertion rollback. These are API fixture tests; actual Reaper integration
 and native Mac behavior still require a DAW test on a Mac.
+
+For v0.5, the Linux Release VST3 built and all seven suites passed.
+Resolution tests cover exact 96 kHz capture and preview samples, import
+and WAV headers, independent 48 kHz source/output options, above-Nyquist filtering,
+project-rate changes, mixed-rate session recall and old-state migration. Native
+track-write fixtures now check 96 kHz WAVs and exact placement. UI checks open and
+close Tweaks, exercise both selectors and all six room dials, and verify reset and
+recall. An independent native kWoodRoom comparison verifies non-default parameters
+and the external blend at both 48 and 96 kHz.
 
 The workflow tests write actual editor previews and synthetic demo WAVs
 under `build/previews`. The recording suite additionally checks mono/stereo input,

@@ -44,8 +44,9 @@ The existing deterministic seeds (`0x12345678` / `0x87654321`) permit exact upst
 comparisons. The reference suite compiles the untouched VST2 implementation using
 an independently written test shim, without the Steinberg VST2 SDK.
 
-The choir's Room control is an external blend of the fully wet engine at its native
-default settings. The render-tail bound and final fade are outside Airwindows DSP.
+The choir's Room control is an external blend of the engine return. Its initial
+settings are the native defaults with native Dry/Wet fully wet; Tweaks exposes all
+six existing normalized parameters and the existing sample-rate API. The render-tail bound and final fade are outside Airwindows DSP.
 The original MIT notice is in `third_party/airwindows/LICENSE`.
 
 ## Reaper host integration

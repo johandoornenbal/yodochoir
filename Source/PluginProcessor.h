@@ -9,6 +9,9 @@ public:
     ~ChoirProcessor() override;
     static juce::AudioProcessorValueTreeState::ParameterLayout layout();
     choir::Settings settings() const;
+    double sampleResolution() const;
+    double outputResolution() const;
+    double projectResolution() const {return hostRate.load();}
     bool loadTake(const juce::File&,int slot);
     void clearTake(int slot);
     void loadDemo();
@@ -71,7 +74,7 @@ private:
         unsigned mask=0;
         int inputChannels=0;
         size_t frames=0;
-        double rate=48000.;
+        double rate=48000.,targetRate=48000.;
         int slot=0;
         uint64_t serial=0;
         bool hasTimeline=false;
@@ -118,6 +121,9 @@ private:
     juce::String messageText{"Load vocal takes, or try the synthetic demo."};
     juce::AudioFormatManager formats;
     std::array<std::atomic<float>*,7> values{};
+    std::atomic<float>* sampleMode=nullptr;
+    std::atomic<float>* outputMode=nullptr;
+    std::array<std::atomic<float>*,6> roomValues{};
     std::atomic<float>* original=nullptr;
     std::atomic<float>* loop=nullptr;
     std::atomic<float>* monitor=nullptr;

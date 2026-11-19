@@ -13,13 +13,16 @@ struct Take {
     std::string name;
     bool hasTimeline=false;
     double startSeconds=0;
+    double rate=sampleRate;
     Waveform preview{};
-    std::vector<float> mono; // Canonical 48 kHz; immutable once published.
+    std::vector<float> mono; // At this take's rate; immutable once published.
 };
 struct Settings {
     int singers=12;
     float detune=9.f, timing=25.f, width=.85f, room=.18f, outputDb=-3.f;
     int seed=1977;
+    double sourceRate=sampleRate, outputRate=sampleRate;
+    std::array<float,6> roomParameters{.5f,.5f,.25f,.5f,.75f,1.f};
     bool operator==(const Settings& b) const;
 };
 struct Render {
@@ -31,7 +34,7 @@ struct Render {
     bool hasTimeline=false,mixedStarts=false;
     double startSeconds=0;
 };
-std::vector<float> resample(const std::vector<float>& input,double sourceRate);
+std::vector<float> resample(const std::vector<float>& input,double sourceRate,double targetRate=sampleRate);
 std::shared_ptr<const Take> demo(int variation);
 Waveform waveform(const std::vector<float>& audio);
 // Runs off the audio thread. Cancellation and progress are optional callbacks.

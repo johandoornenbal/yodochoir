@@ -52,8 +52,8 @@ template<class T> void capturedRate(double rate) {
     }
     check(p.takes()[0]==old,"Unfinished capture replaced the previous take");
     p.finishRecording(); finished(p);
-    const auto take=p.takes()[0]; check(take && take!=old,"Recording was not committed");
-    const auto converted=choir::resample(expected,rate);
+    const auto take=p.takes()[0]; check(take && take->rate==rate && take!=old,"Recording was not committed");
+    const auto converted=choir::resample(expected,rate,rate);
     check(take->mono==converted,"Capture changed input samples or host sample rate");
     p.requestRender(); rendered(p); check(p.rendered()->left.size()>=take->mono.size(),"Captured take could not render");
 }
@@ -105,7 +105,7 @@ template<class T> void fourPairs(double rate,bool music=false) {
     }
     p.finishRecording();finished(p);
     for(size_t pair=0;pair<4;++pair) {
-        const auto converted=choir::resample(expected[pair],rate);
+        const auto converted=choir::resample(expected[pair],rate,rate);
         check(p.takes()[pair] && p.takes()[pair]->mono==converted,"Input pair leaked into or missed its assigned take");
         check(p.takes()[pair]->mono.size()==p.takes()[0]->mono.size(),"Simultaneous takes are not sample-aligned");
     }
@@ -117,7 +117,7 @@ template<class T> void fourPairs(double rate,bool music=false) {
     for(int c=0;c<8;++c) for(int i=0;i<512;++i) block.setSample(channel[static_cast<size_t>(c)],i,static_cast<T>((c+1)*.1));
     hostProcess(p,block,midi);p.finishRecording();finished(p);
     std::vector<float> mono(512,static_cast<float>((double(static_cast<float>(T(.7)))+double(static_cast<float>(T(.8))))*.5));
-    check(p.takes()[3]->mono==choir::resample(mono,rate),"Single-slot capture did not use pair 7/8");
+    check(p.takes()[3]->mono==choir::resample(mono,rate,rate),"Single-slot capture did not use pair 7/8");
     for(size_t pair=0;pair<3;++pair) check(p.takes()[pair]==bank[pair],"Single-slot capture changed another pair");
     auto buses=p.getBusesLayout();buses.inputBuses.set(0,juce::AudioChannelSet::stereo());check(p.setBusesLayout(buses),"Legacy stereo input rejected");
     check(!p.startRecordingAll(),"Record all armed without eight inputs");

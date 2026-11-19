@@ -54,7 +54,7 @@ int main() try {
     for(int i=0;i<256;++i) check(b.getSample(0,i)==(i<17?0.f:clip->left[static_cast<size_t>(i-17)]),"MIDI trigger not sample accurate");
     p.stop(); set(p,"original",1); p.play(); p.processBlock(b,midi);
     for(int i=0;i<256;++i) check(b.getSample(0,i)==clip->dry[static_cast<size_t>(i)] && b.getSample(1,i)==b.getSample(0,i),"Original preview wrong");
-    set(p,"original",0); p.prepareToPlay(44100,256); p.play(); juce::AudioBuffer<double> d(2,256); p.processBlock(d,midi);
+    set(p,"original",0); set(p,"sampleMode",1);set(p,"outputMode",1);p.prepareToPlay(44100,256); p.play(); juce::AudioBuffer<double> d(2,256); p.processBlock(d,midi);
     for(int i=0;i<256;++i) {
         const double pos=i*48000./44100.; const auto at=static_cast<size_t>(pos); const double f=pos-double(at);
         check(std::abs(d.getSample(0,i)-(clip->left[at]*(1-f)+clip->left[at+1]*f))<1.e-12,"Host-rate playback changed duration/pitch");
