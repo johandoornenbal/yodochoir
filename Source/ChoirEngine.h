@@ -11,6 +11,8 @@ constexpr int sampleRate=48000, slots=4, maxSeconds=120;
 using Waveform=std::array<float,256>;
 struct Take {
     std::string name;
+    bool hasTimeline=false;
+    double startSeconds=0;
     Waveform preview{};
     std::vector<float> mono; // Canonical 48 kHz; immutable once published.
 };
@@ -26,6 +28,8 @@ struct Render {
     float peakTrimDb=0;
     Settings settings;
     uint64_t revision=0;
+    bool hasTimeline=false,mixedStarts=false;
+    double startSeconds=0;
 };
 std::vector<float> resample(const std::vector<float>& input,double sourceRate);
 std::shared_ptr<const Take> demo(int variation);

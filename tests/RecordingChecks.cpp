@@ -1,4 +1,4 @@
-#include "../Source/PluginProcessor.h"
+#include "TestTransport.h"
 #include "../Source/OutputMeter.h"
 #include <chrono>
 #include <thread>
@@ -47,7 +47,7 @@ template<class T> void capturedRate(double rate) {
             expected.push_back(static_cast<float>((double(static_cast<float>(l))+double(static_cast<float>(r)))*.5));
         }
         midi.addEvent(juce::MidiMessage::noteOn(1,60,(juce::uint8)100),0);
-        p.processBlock(audio,midi); check(audio.getMagnitude(0,0,n)==0,"Input leaked with monitoring disabled");
+        hostProcess(p,audio,midi); check(audio.getMagnitude(0,0,n)==0,"Input leaked with monitoring disabled");
         check(!p.isPlaying(),"MIDI triggered preview during recording");
     }
     check(p.takes()[0]==old,"Unfinished capture replaced the previous take");
@@ -64,7 +64,7 @@ void concurrentStops() {
         juce::AudioBuffer<float> block(2,128); juce::MidiBuffer midi;
         while(running.load()) {
             for(int c=0;c<2;++c) for(int i=0;i<128;++i) block.setSample(c,i,.2f);
-            p.processBlock(block,midi); std::this_thread::sleep_for(std::chrono::microseconds(300));
+            hostProcess(p,block,midi); std::this_thread::sleep_for(std::chrono::microseconds(300));
         }
     });
     try {
@@ -99,7 +99,7 @@ template<class T> void fourPairs(double rate,bool music=false) {
                 expected[static_cast<size_t>(pair)].push_back(static_cast<float>((double(static_cast<float>(l))+double(static_cast<float>(r)))*.5));
             }
         }
-        p.processBlock(input,midi);
+        hostProcess(p,input,midi);
         for(int c=0;c<8;++c) check(input.getMagnitude(c,0,n)==0,"Unused input pins leaked into output");
         for(const auto& t:p.takes()) check(!t,"A parallel capture was committed before Stop");
     }
@@ -110,12 +110,12 @@ template<class T> void fourPairs(double rate,bool music=false) {
         check(p.takes()[pair]->mono.size()==p.takes()[0]->mono.size(),"Simultaneous takes are not sample-aligned");
     }
     const auto bank=p.takes();
-    check(p.startRecordingAll(),"Cannot start parallel cancellation test");juce::AudioBuffer<T> block(8,512);block.clear();p.processBlock(block,midi);p.cancelRecording();finished(p);
+    check(p.startRecordingAll(),"Cannot start parallel cancellation test");juce::AudioBuffer<T> block(8,512);block.clear();hostProcess(p,block,midi);p.cancelRecording();finished(p);
     check(p.takes()==bank,"Cancelling parallel capture replaced previous takes");
     // Single-slot recording uses that slot's own pair on an eight-input instance.
     check(p.startRecording(3),"Cannot record pair 7/8 independently");
     for(int c=0;c<8;++c) for(int i=0;i<512;++i) block.setSample(channel[static_cast<size_t>(c)],i,static_cast<T>((c+1)*.1));
-    p.processBlock(block,midi);p.finishRecording();finished(p);
+    hostProcess(p,block,midi);p.finishRecording();finished(p);
     std::vector<float> mono(512,static_cast<float>((double(static_cast<float>(T(.7)))+double(static_cast<float>(T(.8))))*.5));
     check(p.takes()[3]->mono==choir::resample(mono,rate),"Single-slot capture did not use pair 7/8");
     for(size_t pair=0;pair<3;++pair) check(p.takes()[pair]==bank[pair],"Single-slot capture changed another pair");
@@ -132,15 +132,15 @@ int main() try {
     check(p.getTotalNumInputChannels()==2,"Default Reaper input is not stereo");
     juce::AudioBuffer<float> audio(2,512); juce::MidiBuffer midi;
     for(int c=0;c<2;++c) for(int i=0;i<512;++i) audio.setSample(c,i,c==0?.25f:.5f);
-    set(p,"inputMonitor",1); p.processBlock(audio,midi);
+    set(p,"inputMonitor",1); hostProcess(p,audio,midi);
     check(audio.getSample(0,100)==.25f && audio.getSample(1,100)==.5f,"Idle input monitoring changed samples");
     set(p,"inputMonitor",0); check(p.startRecording(0),"Could not start cancellation test");
-    p.processBlock(audio,midi); p.cancelRecording(); finished(p); check(p.takes()[0]==old,"Cancel destroyed previous take");
+    hostProcess(p,audio,midi); p.cancelRecording(); finished(p); check(p.takes()[0]==old,"Cancel destroyed previous take");
     check(p.startRecording(0),"Could not start empty recording"); p.finishRecording(); finished(p);
     check(p.takes()[0]==old,"Empty recording destroyed previous take");
-    check(p.startRecording(0),"Could not start rate-change test"); audio.clear(); p.processBlock(audio,midi); p.prepareToPlay(96000,512); finished(p);
+    check(p.startRecording(0),"Could not start rate-change test"); audio.clear(); hostProcess(p,audio,midi); p.prepareToPlay(96000,512); finished(p);
     check(p.takes()[0]->mono.size()==512,"Host rate change changed the captured take's rate");
-    p.prepareToPlay(48000,512); check(p.startRecording(0),"Could not start bypass test"); audio.clear(); p.processBlock(audio,midi);
+    p.prepareToPlay(48000,512); check(p.startRecording(0),"Could not start bypass test"); audio.clear(); hostProcess(p,audio,midi);
     for(int c=0;c<2;++c) for(int i=0;i<512;++i) audio.setSample(c,i,.25f);
     p.processBlockBypassed(audio,midi); finished(p); check(p.takes()[0]->mono.size()==512 && audio.getSample(0,0)==.25f,"Bypass did not commit capture and pass input");
     // Backward-compatible no-input layout, and mono sends on a stereo-output track.
@@ -148,7 +148,7 @@ int main() try {
     check(p.setBusesLayout(layout),"Legacy no-input layout rejected"); check(!p.startRecording(1),"Recording armed with no input bus");
     layout.inputBuses.set(0,juce::AudioChannelSet::mono()); check(p.setBusesLayout(layout),"Mono input rejected");
     check(p.startRecording(1),"Mono recording refused"); set(p,"inputMonitor",1);
-    for(int i=0;i<512;++i) {audio.setSample(0,i,.2f);audio.setSample(1,i,.9f);} p.processBlock(audio,midi);
+    for(int i=0;i<512;++i) {audio.setSample(0,i,.2f);audio.setSample(1,i,.9f);} hostProcess(p,audio,midi);
     check(audio.getSample(1,0)==.2f,"Mono monitoring did not duplicate its input"); p.releaseResources(); finished(p);
     check(p.takes()[1]->mono.size()==512 && p.takes()[1]->mono[100]==.2f,"Mono capture read the unused second input");
     // Old sessions reset the newly-added monitoring parameter to its default off.
@@ -162,10 +162,10 @@ int main() try {
     juce::AudioBuffer<double> chunk(8,16384);
     check(longTakes.startRecordingAll(),"Could not start two-minute parallel recording");
     size_t sent=0;const size_t limit=static_cast<size_t>(choir::sampleRate*choir::maxSeconds);
-    while(longTakes.isRecording()) {
+    while(longTakes.isArmed() || longTakes.isRecording()) {
         const int n=static_cast<int>(std::min<size_t>(16384,limit+17-sent));chunk.setSize(8,n,false,false,true);
         for(int c=0;c<8;++c) for(int i=0;i<n;++i) chunk.setSample(c,i,.125*(c/2+1));
-        longTakes.processBlock(chunk,midi);sent+=static_cast<size_t>(n);
+        hostProcess(longTakes,chunk,midi);sent+=static_cast<size_t>(n);
     }
     finished(longTakes);
     for(size_t slot=0;slot<4;++slot) {
@@ -185,9 +185,9 @@ int main() try {
     ChoirProcessor ui; ui.prepareToPlay(48000,512); ui.loadDemo();
     std::unique_ptr<juce::AudioProcessorEditor> editor(ui.createEditor());
     auto* record=dynamic_cast<juce::Button*>(find(*editor,"recordAll")); check(record && record->onClick,"Record all control missing");record->onClick();
-    check(ui.isRecording() && ui.recordingSlot()==-2,"Record all did not arm all four slots");
+    check(ui.isArmed() && !ui.isRecording() && ui.recordingSlot()==-2,"Record all did not arm all four slots");
     juce::AudioBuffer<float> pairs(8,512);
-    for(int block=0;block<50;++block) {for(int c=0;c<8;++c) for(int i=0;i<512;++i) pairs.setSample(c,i,.4f*std::sin((block*512+i)*(.04f+c*.005f)));ui.processBlock(pairs,midi);}
+    for(int block=0;block<50;++block) {for(int c=0;c<8;++c) for(int i=0;i<512;++i) pairs.setSample(c,i,.4f*std::sin((block*512+i)*(.04f+c*.005f)));hostProcess(ui,pairs,midi);}
     for(int i=0;i<40;++i) pump();
     bool inputVisible=false;
     for(auto* child:editor->getChildComponent(0)->getChildren()) if(auto* meter=dynamic_cast<OutputMeter*>(child)) inputVisible=inputVisible || meter->getLevelDb()>-30.f;

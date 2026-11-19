@@ -85,6 +85,10 @@ std::unique_ptr<Render> render(const std::array<std::shared_ptr<const Take>,slot
     const size_t tail=s.room>0?sampleRate*6:0;
     const size_t count=longest+static_cast<size_t>(std::ceil(s.timing*.001*sampleRate))+tail;
     auto result=std::make_unique<Render>(); result->settings=s;
+    for(const auto& take:sources) if(take->hasTimeline) {
+        if(result->hasTimeline && std::abs(result->startSeconds-take->startSeconds)>1./sampleRate) result->mixedStarts=true;
+        if(!result->hasTimeline) {result->hasTimeline=true;result->startSeconds=take->startSeconds;}
+    }
     result->left.resize(count); result->right.resize(count); result->dry.resize(count);
     std::copy(sources[0]->mono.begin(),sources[0]->mono.end(),result->dry.begin());
     Random rng{static_cast<uint32_t>(s.seed)^0xa5f179b3u};

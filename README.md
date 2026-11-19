@@ -2,7 +2,7 @@
 
 Turn a few vocal takes into a stereo ensemble, entirely on your computer.
 Import or record up to four takes of the **same phrase**, render 4–32 virtual singers,
-audition the result and export a WAV to your DAW. The interface and Apple Silicon
+audition the result, export a WAV, or write an aligned item directly to its Reaper track. The interface and Apple Silicon
 install workflow follow [ToTape Studio](https://github.com/johandoornenbal/tape).
 
 ![YodoChoir native editor](docs/ui-preview.png)
@@ -57,12 +57,17 @@ mono takes. Output remains on track channels 1/2.
 1. Insert YodoChoir as an ordinary track FX on a dedicated capture track. Route
    the four vocal sends as above. No MIDI send is required to record. Source-track
    FX, send modes and faders determine what reaches each input pair.
-2. Press **REC ALL**, then play the phrases in Reaper. All four slots begin on the
-   same audio callback and receive identical sample counts, keeping them aligned.
-   The input meters show the highest left/right input levels across the four pairs.
-3. Press **STOP ALL** or the main **Stop** button. All four takes are prepared in
-   the background and committed together. They also stop together at **2:00**.
-4. Press **Render choir**, then **Preview** or **Export WAV**.
+2. With Reaper stopped, press **ARM ALL** (or a slot's **REC**). This only arms:
+   stopped callbacks and live input are not recorded. Position the playhead at the
+   desired start, then press Reaper **Play**. All four slots start together on the
+   first playing audio block, with identical sample counts.
+3. Press Reaper **Stop**. Capture ends before any stopped audio is recorded; the
+   original recording start is retained even if Reaper returns its cursor elsewhere.
+   The plugin's **STOP ALL** / **Stop** also ends capture. Takes are prepared together
+   in the background, and recording still stops automatically at **2:00**.
+4. Press **Write to track** for the writing phase: it renders the current settings,
+   saves a stereo WAV including the room tail, then adds an item on this plugin's
+   own track at the saved recording start. See the writing notes below.
 
 **Cancel capture** discards the entire recording pass, preserving all previous
 takes. All four slots are replaced after a successful Record all, including slots
@@ -71,7 +76,7 @@ sending everything to 1/2 mixes those sources into Take 1.
 
 The individual **REC** buttons remain available for retakes: on an eight-input
 instance each uses its own numbered pair. A four- or six-input layout can record
-the available pairs individually, but **REC ALL requires all eight inputs**.
+the available pairs individually, but **ARM ALL requires all eight inputs**.
 Older mono/stereo instances still support the previous single-take workflow, where
 any slot's REC button captures input 1/2 (or the mono input). Enable eight inputs
 for the new simultaneous workflow. Rescan/restart Reaper after installing if its
@@ -80,7 +85,7 @@ cached plugin layout still exposes only two pins.
 The plugin identity is unchanged, so older input-free instances can still preview
 and render imported samples. Add/enable its input bus to record sends.
 
-**Monitor 1/2** lets you hear the first input pair through the YodoChoir track
+**Track audio 1/2** lets you hear the first input pair through the YodoChoir track
 while preview is stopped. Other pairs are recorded independently and are not mixed
 into this monitor signal. It defaults off, useful when the source is already audible
 through its own master send. If monitoring through YodoChoir, choose the source
@@ -94,15 +99,47 @@ source editing briefly. Rendering, auditioning and exporting wait until capture
 has finished. The four per-slot REC buttons and main Stop control are not host
 record-arm controls; they record only the audio actually delivered to the plugin.
 
-Recording is independent of Reaper's transport: if the host continues processing
-while stopped, silence or live input can still be captured until you press Stop.
-When the host notifies the plugin of bypass, device release or a sample-rate
-change, capture stops and the partial take is kept at its recorded sample rate.
-If the host simply stops calling the plugin, capture waits for more samples or
-your Stop press.
-A two-minute limit is measured in received audio samples, not wall-clock time.
-Recording requires an active host audio callback. Keep recordings in Reaper if
-transport-synchronised punch-in/out is needed.
+Recording follows host transport and requires valid host time information and
+active audio callbacks. If armed while already playing, it waits for Stop then
+Play. A seek or loop jump ends the current continuous pass instead of joining
+unrelated positions. Bypass, device release and sample-rate changes also finalize
+partial takes. A Reaper timer fallback detects Stop if audio callbacks cease.
+Other hosts without time information stay armed; they do not invent a start time.
+The two-minute limit measures received samples, not wall-clock time.
+
+### Writing an aligned item in Reaper
+
+Save the Reaper project first, then stop transport and press **Write to track**.
+The writing phase runs rendering and WAV encoding in the background; item creation
+runs on Reaper's main thread through its native VST3 extension API. The WAV is
+48 kHz / 24-bit PCM, stored in a `YodoChoir` folder beside the project, with a unique
+filename. Its item includes the complete rendered tail and uses the recorded
+start, zero source offset, normal playback rate, seconds timebase and no automatic
+item-edge fades. The choir's intentional singer onset offsets remain unchanged.
+Alignment uses the sample position reported by the host for the first playing
+block, so moving the cursor after recording does not move the print.
+
+The destination is the track containing this instance, even if another track or
+project tab is selected. Writing creates one undoable new item, preserves existing
+items, and does not move the cursor or change track selection. If the owning track
+or project changes during writing, placement is cancelled and the WAV is retained
+for manual import. Recorded starts survive session recall. Takes recorded at
+different starts must be re-recorded as an aligned pass before writing; imported
+files have no capture anchor and use the owning project's edit cursor at the time
+**Write to track** is pressed. Older sessions also have no stored capture anchor.
+
+After insertion, **Track audio 1/2** is enabled so the new item passes through the
+plugin. **Mute the source sends for choir-only playback**: sends and the printed
+item share the track's inputs. Before another capture, mute/remove earlier printed
+items too, so they do not become part of Take 1. Repeated writes add separate items;
+manage or undo older prints to avoid hearing overlapping copies.
+
+Native insertion requires a regular, non-bridged Reaper VST3 track-FX instance with
+its extension API available. Other hosts can still render, preview and **Export
+WAV** for manual import. This plugin does not remotely control Reaper's transport;
+use the normal DAW Play and Stop buttons.
+
+![YodoChoir armed and waiting for transport](docs/ui-armed.png)
 
 ![YodoChoir recording routed input](docs/ui-recording.png)
 
@@ -134,7 +171,7 @@ Note number/velocity do not transpose or shape
 it in this prototype, and Note Off does not truncate the phrase. All Notes Off,
 All Sound Off, the Stop button and host bypass stop preview. Loop preview repeats
 the phrase and room tail. Host tempo, transport position and MIDI chords do not
-control the render. For arranging, exporting the WAV is the main workflow.
+control the render. For arranging, use Write to track in Reaper or export a WAV.
 
 Changing render controls or sources makes the previous result stale and stops
 preview at the next callback. Render again before previewing or exporting. Render
@@ -255,7 +292,7 @@ cmake --build build --parallel 3
 ctest --test-dir build --output-on-failure
 ```
 
-The five suites cover deterministic ensemble rendering, variation, stereo and
+The six suites cover deterministic ensemble rendering, variation, stereo and
 mono behaviour, source-rate conversion, extreme controls, headroom, cancellation,
 file import and limits, MIDI event offsets, Original/Choir preview, float/double
 host playback, export samples/format, embedded-source session recall, stale-render
@@ -279,6 +316,14 @@ simultaneous 120-second takes and their session recall. Channel-isolation checks
 cover both the default VST3 input order and JUCE's 7.1 Music remapping. kWoodRoom
 passed 96 exact upstream float/double comparisons, and the ensemble test verifies
 its fully wet return and the wrapper Room blend independently.
+
+For v0.4, the Linux Release VST3 built and all six suites passed.
+Transport/native-write tests simulate Reaper's host extension and API.
+They verify arm-only behavior, Play/Stop boundaries, exact saved start and recall,
+seek handling, suspended-callback Stop, unsaved-project protection, destination
+ownership, cursor independence, retained room tail,
+undo and insertion rollback. These are API fixture tests; actual Reaper integration
+and native Mac behavior still require a DAW test on a Mac.
 
 The workflow tests write actual editor previews and synthetic demo WAVs
 under `build/previews`. The recording suite additionally checks mono/stereo input,

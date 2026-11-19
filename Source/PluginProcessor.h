@@ -1,8 +1,9 @@
 #pragma once
 #include <juce_audio_utils/juce_audio_utils.h>
 #include "ChoirEngine.h"
+#include "ReaperBridge.h"
 #include <mutex>
-class ChoirProcessor final : public juce::AudioProcessor, private juce::Thread {
+class ChoirProcessor final : public juce::AudioProcessor, private juce::Thread,private juce::Timer {
 public:
     ChoirProcessor();
     ~ChoirProcessor() override;
@@ -19,11 +20,16 @@ public:
     void play();
     void stop();
     bool startRecording(int slot);
+    bool isArmed() const {return armed.load();}
+    ReaperBridge reaper;
+    juce::VST3ClientExtensions* getVST3ClientExtensions() override {return &reaper;}
+    void requestWrite();
+    bool isWriting() const {return writeBusy.load();}
     bool startRecordingAll();
     void finishRecording();
     void cancelRecording();
     bool isRecording() const { return recording.load(); }
-    bool captureActive() const { return recording.load() || captureBusy.load(); }
+    bool captureActive() const { return armed.load() || recording.load() || captureBusy.load(); }
     int recordingSlot() const { return captureSlot.load(); }
     double recordingSeconds() const { return captureSeconds.load(); }
     std::array<std::atomic<float>,2> inputPeaks{};
@@ -68,8 +74,21 @@ private:
         double rate=48000.;
         int slot=0;
         uint64_t serial=0;
+        bool hasTimeline=false;
+        double startSeconds=0;
     };
     bool beginRecording(unsigned mask,int selectedSlot);
+    struct WriteJob {
+        ReaperBridge::Context context;
+        juce::File file;
+        uint64_t revision=0;
+        choir::Settings settings;
+        double startSeconds=0,length=0;
+        bool success=false;
+    };
+    void timerCallback() override;
+    void writeAudio();
+    void syncTransport(int frames);
     void run() override;
     void finalizeCapture();
     template<class T> void captureInput(const juce::AudioBuffer<T>&);
@@ -81,6 +100,12 @@ private:
     }
     juce::SpinLock captureLock;
     std::unique_ptr<Capture> capture;
+    std::atomic<bool> armed{false},waitForStop{false},transportPlaying{false},transportKnown{false};
+    std::atomic<juce::uint32> lastAudioCallback{0};
+    double expectedPosition=0; // Audio-thread timeline continuity guard.
+    std::mutex writeMutex;
+    std::unique_ptr<WriteJob> writeJob;
+    std::atomic<bool> writeBusy{false},writePending{false},writeReady{false};
     std::atomic<bool> recording{false},captureBusy{false},capturePending{false},captureInterrupted{false},captureAtLimit{false};
     std::atomic<uint64_t> captureSerial{0};
     std::atomic<int> captureSlot{-1};
@@ -103,4 +128,5 @@ private:
     std::atomic<double> hostRate{48000.};
     double cursor=0; // Protected by renderLock or audio-thread ownership.
     std::atomic<float> position{0};
+    static bool saveWav(const std::shared_ptr<const choir::Render>&,const juce::File&);
 };

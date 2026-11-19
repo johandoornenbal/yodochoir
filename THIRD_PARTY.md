@@ -47,3 +47,11 @@ an independently written test shim, without the Steinberg VST2 SDK.
 The choir's Room control is an external blend of the fully wet engine at its native
 default settings. The render-tail bound and final fade are outside Airwindows DSP.
 The original MIT notice is in `third_party/airwindows/LICENSE`.
+
+## Reaper host integration
+
+`Source/ReaperBridge.cpp` declares the small host-interface ABI documented in
+[Cockos' Reaper VST3 interfaces](https://github.com/justinfrankel/reaper-sdk/blob/main/sdk/reaper_vst3_interfaces.h)
+and resolves the public [Reaper API](https://www.reaper.fm/sdk/reascript/reascripthelp.html).
+No Reaper implementation or SDK library is distributed. VST3 base interfaces come
+from JUCE's bundled SDK and retain its notices.
