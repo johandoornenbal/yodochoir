@@ -4,6 +4,8 @@ Turn a few vocal takes into a stereo ensemble, entirely on your computer.
 Import or record up to four takes of the **same phrase**, render 4–32 virtual singers,
 audition the result, export a WAV, or write an aligned item directly to its Reaper track. The interface and Apple Silicon
 install workflow follow [ToTape Studio](https://github.com/johandoornenbal/tape).
+The header features the supplied YIP&C branding adapted to the same brass, cream
+and charcoal palette.
 
 ![YodoChoir native editor](docs/ui-preview.png)
 

@@ -41,10 +41,13 @@ juce_add_plugin(YodoChoir
   IS_SYNTH FALSE NEEDS_MIDI_INPUT TRUE NEEDS_MIDI_OUTPUT FALSE
   IS_MIDI_EFFECT FALSE EDITOR_WANTS_KEYBOARD_FOCUS FALSE
   COPY_PLUGIN_AFTER_BUILD FALSE VST3_CATEGORIES Fx Tools)
+juce_add_binary_data(YodoChoirAssets SOURCES resources/yipc_logo.png
+  NAMESPACE YodoChoirAssets HEADER_NAME YodoChoirAssets.h)
+set_target_properties(YodoChoirAssets PROPERTIES POSITION_INDEPENDENT_CODE ON)
 juce_generate_juce_header(YodoChoir)
 target_sources(YodoChoir PRIVATE Source/Plugin.cpp Source/ReaperBridge.cpp)
 target_compile_definitions(YodoChoir PUBLIC JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
-target_link_libraries(YodoChoir PRIVATE choir_engine juce::juce_audio_utils
+target_link_libraries(YodoChoir PRIVATE YodoChoirAssets choir_engine juce::juce_audio_utils
   PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
 if(BUILD_TESTING)
   add_executable(plugin_checks tests/PluginChecks.cpp)

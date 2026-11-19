@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "Look.h"
+#include "YodoChoirAssets.h"
 #include "OutputMeter.h"
 #include <cmath>
 #include <cstring>
@@ -522,6 +523,9 @@ private:
 class ChoirPanel final : public juce::Component,public juce::FileDragAndDropTarget,private juce::Timer {
 public:
     explicit ChoirPanel(ChoirProcessor& p):processor(p),tweaks(p) {
+        brandLogo.setImage(juce::ImageCache::getFromMemory(YodoChoirAssets::yipc_logo_png,YodoChoirAssets::yipc_logo_pngSize));
+        brandLogo.setComponentID("brandLogo");brandLogo.setInterceptsMouseClicks(false,false);
+        brandLogo.setTitle("YIP&C — YODO International Projects & Consultancy");addAndMakeVisible(brandLogo);
         setLookAndFeel(&look);
         for(size_t i=0;i<4;++i) {
             addAndMakeVisible(load[i]); addAndMakeVisible(clear[i]); addAndMakeVisible(recordButtons[i]);
@@ -605,6 +609,7 @@ public:
         refresh();
     }
     void resized() override {
+        brandLogo.setBounds(30,12,260,84);
         tweakButton.setBounds(700,56,145,29);tweaks.setBounds(40,115,1014,565);
         sizeChoice.setBounds(864,15,190,27); reset.setBounds(864,56,190,29);
         demoButton.setBounds(446,128,119,26); cancelCaptureButton.setBounds(323,128,115,26); recordAllButton.setBounds(205,128,110,26); monitorButton.setBounds(602,320,190,26);
@@ -619,9 +624,8 @@ public:
     void paint(juce::Graphics& g) override {
         using namespace style;
         g.fillAll(cream); g.setColour(ink); g.setFont(juce::FontOptions(11.f));
-        g.drawText("YODO AUDIO    /    PHRASE ENSEMBLE",32,15,650,22,juce::Justification::left);
-        g.setFont(juce::FontOptions(40.f)); g.drawText("YodoChoir",30,42,300,55,juce::Justification::left);
-        g.setFont(juce::FontOptions(12.f)); g.drawText("S T U D I O   /   P R O T O T Y P E  0 5",290,68,500,20,juce::Justification::left);
+        g.setFont(juce::FontOptions(38.f));g.drawText("YodoChoir",315,20,330,50,juce::Justification::left);
+        g.setFont(juce::FontOptions(12.f));g.drawText("S T U D I O   /   P H R A S E  E N S E M B L E",317,73,365,20,juce::Justification::left);
         g.setGradientFill(juce::ColourGradient(juce::Colour(0xff343d36),0,108,juce::Colour(0xff19221d),0,780,false));
         g.fillRoundedRectangle(16,108,1068,674,16); g.setColour(gold.withAlpha(.25f)); g.drawRoundedRectangle({17.f,109.f,1066.f,672.f},15,1);
         for(float x:{30.f,1070.f}) for(float y:{122.f,768.f}) {g.setColour(ink.darker());g.fillEllipse(x-4,y-4,8,8);g.setColour(muted);g.drawLine(x-2,y+1,x+2,y-1,1);}
@@ -716,6 +720,7 @@ private:
     }
     ChoirProcessor& processor;
     style::Look look;
+    juce::ImageComponent brandLogo;
     TweakPanel tweaks;
     juce::TextButton tweakButton{"TWEAKS"};
     std::array<juce::TextButton,4> load,clear,recordButtons;
