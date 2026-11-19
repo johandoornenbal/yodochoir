@@ -52,7 +52,15 @@ public:
     void processBlockBypassed(juce::AudioBuffer<float>& b,juce::MidiBuffer&) override { bypass(b); }
     void processBlockBypassed(juce::AudioBuffer<double>& b,juce::MidiBuffer&) override { bypass(b); }
     bool supportsDoublePrecisionProcessing() const override { return true; }
-    bool isBusesLayoutSupported(const BusesLayout& b) const override { const auto in=b.getMainInputChannelSet(); return (in.isDisabled() || in==juce::AudioChannelSet::mono() || in==juce::AudioChannelSet::stereo() || in==juce::AudioChannelSet::quadraphonic() || in==juce::AudioChannelSet::create5point1() || in==juce::AudioChannelSet::create7point1SDDS() || in==juce::AudioChannelSet::create7point1()) && b.getMainOutputChannelSet()==juce::AudioChannelSet::stereo(); }
+    bool isBusesLayoutSupported(const BusesLayout& b) const override {
+        if(b.inputBuses.size()!=1 || b.outputBuses.size()!=1) return false;
+        const auto in=b.getMainInputChannelSet();
+        // Reaper can propose stereo regardless of the constructor's default.
+        // Accepting it permanently hides capture pairs 3/4, 5/6 and 7/8.
+        return (in.isDisabled() || in==juce::AudioChannelSet::create7point1SDDS()
+                || in==juce::AudioChannelSet::create7point1())
+            && b.getMainOutputChannelSet()==juce::AudioChannelSet::stereo();
+    }
     const juce::String getName() const override { return "YodoChoir"; }
     bool acceptsMidi() const override { return true; }
     bool producesMidi() const override { return false; }

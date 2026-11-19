@@ -74,16 +74,27 @@ takes. All four slots are replaced after a successful Record all, including slot
 whose input pair was silent. Send each source to only its intended destination pair;
 sending everything to 1/2 mixes those sources into Take 1.
 
-The individual **REC** buttons remain available for retakes: on an eight-input
-instance each uses its own numbered pair. A four- or six-input layout can record
-the available pairs individually, but **ARM ALL requires all eight inputs**.
-Older mono/stereo instances still support the previous single-take workflow, where
-any slot's REC button captures input 1/2 (or the mono input). Enable eight inputs
-for the new simultaneous workflow. Rescan/restart Reaper after installing if its
-cached plugin layout still exposes only two pins.
+The individual **REC** buttons use their numbered pairs for retakes: slot 1 uses
+1/2, slot 2 uses 3/4, slot 3 uses 5/6, slot 4 uses 7/8. The enabled input bus is
+fixed at **eight inputs**, with **two outputs**. Stereo/mono/four-/six-channel
+host proposals are rejected so a host cannot silently hide three capture pairs.
+An inactive input bus is still supported for imported-source preview/rendering.
+Previously saved takes and controls remain compatible; route new retakes to their
+numbered pair rather than relying on the former stereo-input fallback.
 
-The plugin identity is unchanged, so older input-free instances can still preview
-and render imported samples. Add/enable its input bus to record sends.
+### If Reaper shows only two plugin input pins
+
+Keep **Track channels: 8** and **VST3 bus size: Auto** in the pin connector.
+The global bus-size menu can request eight outputs too, whereas YodoChoir has
+stereo output; it is not the switch for enabling the four capture pairs.
+
+An earlier build accepted Reaper's stereo input proposal despite initially
+advertising eight inputs. The fixed build rejects that negotiation and retains
+all eight input pins. Rebuild and reinstall the latest source, fully restart
+Reaper, and use Preferences → Plug-ins → VST → Re-scan if its plugin information
+is cached. Reinsert the FX if the existing instance still has the old layout.
+The input columns should then number eight, while output has two columns.
+Map track channels 1–8 straight to input pins 1–8 and choir output to 1/2.
 
 **Track audio 1/2** lets you hear the first input pair through the YodoChoir track
 while preview is stopped. Other pairs are recorded independently and are not mixed
@@ -333,7 +344,7 @@ cmake --build build --parallel 3
 ctest --test-dir build --output-on-failure
 ```
 
-The seven suites cover deterministic ensemble rendering, variation, stereo and
+The eight suites (seven on non-Unix platforms) cover deterministic ensemble rendering, variation, stereo and
 mono behaviour, source-rate conversion, extreme controls, headroom, cancellation,
 file import and limits, MIDI event offsets, Original/Choir preview, float/double
 host playback, export samples/format, embedded-source session recall, stale-render
@@ -375,9 +386,16 @@ close Tweaks, exercise both selectors and all six room dials, and verify reset a
 recall. An independent native kWoodRoom comparison verifies non-default parameters
 and the external blend at both 48 and 96 kHz.
 
+The input-pin fix adds a test that loads the actual compiled VST3 through its
+public ABI. It verifies eight input pins and stereo output before and after
+stereo, mono, quad, 5.1 and global eight-channel host proposals, followed by bus
+activation at 96 kHz. This runs on Linux/macOS without pretending to be an actual
+Reaper session. Reaper-on-Mac integration still needs verification in the DAW.
+
 The workflow tests write actual editor previews and synthetic demo WAVs
-under `build/previews`. The recording suite additionally checks mono/stereo input,
-float/double capture at multiple host rates, input monitoring, cancellation,
+under `build/previews`. The recording suite additionally checks stereo-pair input,
+float/double capture at multiple host rates, input monitoring, fixed eight-input
+layout negotiation, cancellation,
 bypass/rate-change finalization, an exact 120-second auto-stop, a state larger
 than 32 MB, restoration of four full-length takes, two-minute WAV export, and the
 per-slot and Record all controls. Parallel checks use distinct signals on all

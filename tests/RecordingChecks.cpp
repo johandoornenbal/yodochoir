@@ -20,7 +20,7 @@ void rendered(ChoirProcessor& p) {
     const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(45);
     while(!p.current() || p.busy.load()) { check(std::chrono::steady_clock::now()<end,"Long render timed out"); pump(); }
 }
-void stereo(ChoirProcessor& p) { auto b=p.getBusesLayout();b.inputBuses.set(0,juce::AudioChannelSet::stereo());check(p.setBusesLayout(b),"Stereo fallback rejected"); }
+
 void set(ChoirProcessor& p,const char* id,float value) { auto* param=p.state.getParameter(id); check(param,"Missing parameter"); param->setValueNotifyingHost(param->convertTo0to1(value)); }
 juce::Component* find(juce::Component& p,const juce::String& id) {
     if(p.getComponentID()==id) return &p;
@@ -32,13 +32,13 @@ void screenshot(juce::AudioProcessorEditor& editor,const juce::File& path) {
     out->setPosition(0); out->truncate(); check(juce::PNGImageFormat().writeImageToStream(image,*out),"Cannot encode recording preview");
 }
 template<class T> void capturedRate(double rate) {
-    ChoirProcessor p; stereo(p); p.prepareToPlay(rate,513); p.loadDemo(); const auto old=p.takes()[0];
+    ChoirProcessor p; p.prepareToPlay(rate,513); p.loadDemo(); const auto old=p.takes()[0];
     check(p.startRecording(0),"Cannot arm stereo recording");
     check(!p.startRecording(1),"Concurrent capture was accepted");
     std::vector<float> expected;
     juce::MidiBuffer midi;
     for(int block=0;block<15;++block) {
-        const int n=std::array<int,5>{1,37,256,513,127}[static_cast<size_t>(block%5)]; juce::AudioBuffer<T> audio(2,n);
+        const int n=std::array<int,5>{1,37,256,513,127}[static_cast<size_t>(block%5)]; juce::AudioBuffer<T> audio(8,n);
         for(int i=0;i<n;++i) {
             const auto index=expected.size();
             const T l=static_cast<T>(.2*std::sin(2*3.141592653589793*220*double(index)/rate));
@@ -58,10 +58,10 @@ template<class T> void capturedRate(double rate) {
     p.requestRender(); rendered(p); check(p.rendered()->left.size()>=take->mono.size(),"Captured take could not render");
 }
 void concurrentStops() {
-    ChoirProcessor p; stereo(p); p.prepareToPlay(48000,128);
+    ChoirProcessor p; p.prepareToPlay(48000,128);
     std::atomic<bool> running{true};
     std::thread audioThread([&] {
-        juce::AudioBuffer<float> block(2,128); juce::MidiBuffer midi;
+        juce::AudioBuffer<float> block(8,128); juce::MidiBuffer midi;
         while(running.load()) {
             for(int c=0;c<2;++c) for(int i=0;i<128;++i) block.setSample(c,i,.2f);
             hostProcess(p,block,midi); std::this_thread::sleep_for(std::chrono::microseconds(300));
@@ -119,8 +119,8 @@ template<class T> void fourPairs(double rate,bool music=false) {
     std::vector<float> mono(512,static_cast<float>((double(static_cast<float>(T(.7)))+double(static_cast<float>(T(.8))))*.5));
     check(p.takes()[3]->mono==choir::resample(mono,rate,rate),"Single-slot capture did not use pair 7/8");
     for(size_t pair=0;pair<3;++pair) check(p.takes()[pair]==bank[pair],"Single-slot capture changed another pair");
-    auto buses=p.getBusesLayout();buses.inputBuses.set(0,juce::AudioChannelSet::stereo());check(p.setBusesLayout(buses),"Legacy stereo input rejected");
-    check(!p.startRecordingAll(),"Record all armed without eight inputs");
+    auto buses=p.getBusesLayout();buses.inputBuses.set(0,juce::AudioChannelSet::stereo());check(!p.setBusesLayout(buses),"Host stereo proposal hid capture pairs");
+    check(p.getTotalNumInputChannels()==8 && p.startRecordingAll(),"Rejected stereo proposal broke eight-input capture");p.cancelRecording();finished(p);
 }
 
 int main() try {
@@ -128,9 +128,9 @@ int main() try {
     fourPairs<float>(48000);fourPairs<double>(44100);fourPairs<float>(48000,true);
     concurrentStops();
     capturedRate<float>(44100); capturedRate<float>(48000); capturedRate<double>(96000); capturedRate<double>(192000);
-    ChoirProcessor p; stereo(p); p.prepareToPlay(48000,512); p.loadDemo(); const auto old=p.takes()[0];
-    check(p.getTotalNumInputChannels()==2,"Default Reaper input is not stereo");
-    juce::AudioBuffer<float> audio(2,512); juce::MidiBuffer midi;
+    ChoirProcessor p; p.prepareToPlay(48000,512); p.loadDemo(); const auto old=p.takes()[0];
+    check(p.getTotalNumInputChannels()==8,"Default Reaper input is not eight channels");
+    juce::AudioBuffer<float> audio(8,512); juce::MidiBuffer midi;
     for(int c=0;c<2;++c) for(int i=0;i<512;++i) audio.setSample(c,i,c==0?.25f:.5f);
     set(p,"inputMonitor",1); hostProcess(p,audio,midi);
     check(audio.getSample(0,100)==.25f && audio.getSample(1,100)==.5f,"Idle input monitoring changed samples");
@@ -143,14 +143,16 @@ int main() try {
     p.prepareToPlay(48000,512); check(p.startRecording(0),"Could not start bypass test"); audio.clear(); hostProcess(p,audio,midi);
     for(int c=0;c<2;++c) for(int i=0;i<512;++i) audio.setSample(c,i,.25f);
     p.processBlockBypassed(audio,midi); finished(p); check(p.takes()[0]->mono.size()==512 && audio.getSample(0,0)==.25f,"Bypass did not commit capture and pass input");
-    // Backward-compatible no-input layout, and mono sends on a stereo-output track.
+    // An inactive input bus still supports imported sources. Hosts cannot
+    // change the enabled bus to mono/stereo and hide three capture pairs.
     auto layout=p.getBusesLayout(); layout.inputBuses.set(0,juce::AudioChannelSet::disabled());
-    check(p.setBusesLayout(layout),"Legacy no-input layout rejected"); check(!p.startRecording(1),"Recording armed with no input bus");
-    layout.inputBuses.set(0,juce::AudioChannelSet::mono()); check(p.setBusesLayout(layout),"Mono input rejected");
-    check(p.startRecording(1),"Mono recording refused"); set(p,"inputMonitor",1);
-    for(int i=0;i<512;++i) {audio.setSample(0,i,.2f);audio.setSample(1,i,.9f);} hostProcess(p,audio,midi);
-    check(audio.getSample(1,0)==.2f,"Mono monitoring did not duplicate its input"); p.releaseResources(); finished(p);
-    check(p.takes()[1]->mono.size()==512 && p.takes()[1]->mono[100]==.2f,"Mono capture read the unused second input");
+    check(p.setBusesLayout(layout),"Disabled input layout rejected");check(!p.startRecording(1),"Recording armed with no input bus");
+    layout.inputBuses.set(0,juce::AudioChannelSet::mono());check(!p.setBusesLayout(layout),"Mono negotiation shrank input pins");
+    layout.inputBuses.set(0,juce::AudioChannelSet::create7point1SDDS());check(p.setBusesLayout(layout),"Eight inputs could not be restored");
+    check(p.startRecording(1),"Pair 3/4 recording refused");set(p,"inputMonitor",1);audio.clear();
+    for(int i=0;i<512;++i) {audio.setSample(0,i,.2f);audio.setSample(1,i,.9f);audio.setSample(2,i,.3f);audio.setSample(3,i,.3f);}hostProcess(p,audio,midi);
+    check(audio.getSample(1,0)==.9f,"Input monitoring changed the first pair");p.releaseResources();finished(p);
+    check(p.takes()[1]->mono.size()==512 && p.takes()[1]->mono[100]==.3f,"Single-slot capture did not read its own pair");
     // Old sessions reset the newly-added monitoring parameter to its default off.
     juce::MemoryBlock state; p.getStateInformation(state);
     auto legacy=juce::ValueTree::readFromData(state.getData(),state.getSize()); legacy.removeChild(legacy.getChildWithProperty("id","inputMonitor"),nullptr);
@@ -195,5 +197,5 @@ int main() try {
     screenshot(*editor,dir.getChildFile("ui-recording.png"));
     auto* cancel=dynamic_cast<juce::Button*>(find(*editor,"cancelCapture")); check(cancel && cancel->onClick,"Cancel capture control missing");cancel->onClick();finished(ui);
     check(!ui.takes()[2] && ui.takes()[0],"UI cancellation modified the take bank");
-    std::cout<<"Reaper-style mono/stereo inputs, float/double capture, host rates, monitor, cancellation, bypass, 120-second limit, large-state recall, long WAV export and recording UI passed\n";
+    std::cout<<"Reaper-style stereo-pair inputs, fixed eight-input layout, float/double capture, host rates, monitor, cancellation, bypass, 120-second limit, large-state recall, long WAV export and recording UI passed\n";
 } catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
