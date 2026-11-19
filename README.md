@@ -220,7 +220,11 @@ Both engines preserve phrase duration and compensate processing latency. Rubber
 Band uses its offline **R3/Finer** engine with formant preservation; Signalsmith
 uses its default-quality preset with formant compensation. Shifted voices are
 spread across the stereo field, receive the existing small singer variations, and
-join the normal voices **before kWoodRoom**. The Original A/B reference stays at
+join the normal voices **before kWoodRoom**. Each transposed voice has a fixed
+**300 ms slow-start fade-in**, starting at its own timing offset: the gain begins
+at silence and rises increasingly steeply to full level, using a normalized
+−60-to-0 dB-shaped curve. This softens octave-shifter onset artifacts without
+moving the voice or changing its duration; normal-octave voices are not faded. The Original A/B reference stays at
 the original pitch. Rendering, export and aligned track writing use the selected
 output rate as before, with the existing room tail. Zero octave counts bypass
 both pitch engines and preserve the previous choir processing.

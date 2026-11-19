@@ -167,6 +167,13 @@ std::unique_ptr<Render> render(const std::array<std::shared_ptr<const Take>,slot
                 }
             }
             if(s.singers>1) { low+=alpha*(value-low); value=.85*value+.15*low; }
+            if(octave!=0) {
+                // 300 ms slow-start fade, relative to this singer's timing offset.
+                // A -60-to-0 dB-shaped ramp, normalized to exact silence at onset.
+                const double age=double(i)-delay;
+                if(age<=0) value=0;
+                else if(age<rate*.3) value*=std::expm1(std::log(1000.)*age/(rate*.3))/999.;
+            }
             result->left[i]+=static_cast<float>(value*gainL);
             result->right[i]+=static_cast<float>(value*gainR);
         }
