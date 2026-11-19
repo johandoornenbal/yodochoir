@@ -70,18 +70,25 @@ int main() try {
     check(toggle && pane && !pane->isVisible(),"Tweak pane does not start collapsed");toggle->setToggleState(true,juce::dontSendNotification);toggle->onClick();check(pane->isVisible(),"Tweak pane did not open");
     auto* samples=dynamic_cast<juce::ComboBox*>(find(*editor,"sampleResolution"));auto* output=dynamic_cast<juce::ComboBox*>(find(*editor,"outputResolution"));check(samples && output,"Resolution selectors missing");
     samples->setSelectedId(1,juce::sendNotificationSync);output->setSelectedId(2,juce::sendNotificationSync);check(p.sampleResolution()==96000 && p.outputResolution()==48000,"Resolution UI not attached");
+    auto* pitch=dynamic_cast<juce::ComboBox*>(find(*editor,"pitchEngine"));
+    auto* up=dynamic_cast<juce::Slider*>(find(*editor,"octaveUp"));auto* down=dynamic_cast<juce::Slider*>(find(*editor,"octaveDown"));
+    check(pitch && up && down && p.settings().pitchEngine==choir::PitchEngine::rubberBand && p.settings().octaveUp==0 && p.settings().octaveDown==0,"Octave controls/defaults missing");
+    pitch->setSelectedId(2,juce::sendNotificationSync);up->setValue(1,juce::sendNotificationSync);down->setValue(1,juce::sendNotificationSync);
+    check(p.settings().pitchEngine==choir::PitchEngine::signalsmith && p.settings().octaveUp==1 && p.settings().octaveDown==1 && !p.current(),"Octave UI not attached or render not stale");
+    up->setValue(4,juce::sendNotificationSync);p.requestRender();check(p.status().contains("exceed"),"Over-budget octave allocation not explained");up->setValue(1,juce::sendNotificationSync);
     const std::array<const char*,6> ids{"roomRegen","roomDerez","roomFilter","roomEarly","roomPosition","roomWet"};
     for(size_t i=0;i<ids.size();++i){auto* dial=dynamic_cast<juce::Slider*>(find(*editor,ids[i]));check(dial,"Native room dial missing");dial->setValue(20+static_cast<double>(i)*10,juce::sendNotificationSync);check(std::abs(p.settings().roomParameters[i]-(.2f+static_cast<float>(i)*.1f))<1.e-6f,"Room dial not attached");}
     juce::MemoryBlock state;p.getStateInformation(state);ChoirProcessor recalled;recalled.prepareToPlay(96000,960);recalled.setStateInformation(state.getData(),static_cast<int>(state.getSize()));wait([&]{return recalled.current() && !recalled.busy.load();});
     check(recalled.settings()==p.settings() && recalled.takes()[0]->mono==expected && recalled.takes()[0]->rate==96000 && recalled.takes()[3]->rate==48000 && recalled.takes()[0]->startSeconds==origin,"Session lost rates, mixed-rate PCM, room settings or anchor");
     auto* reset=dynamic_cast<juce::Button*>(find(*editor,"resetRoom"));check(reset,"Room reset missing");reset->onClick();const std::array<float,6> defaults{.5f,.5f,.25f,.5f,.75f,1.f};check(p.settings().roomParameters==defaults,"Room reset did not preserve original defaults");
+    pitch->setSelectedId(1,juce::sendNotificationSync);set(p,"singers",12);up->setValue(2,juce::sendNotificationSync);down->setValue(2,juce::sendNotificationSync);
     for(int i=0;i<20;++i)pump();auto stream=dir.getChildFile("ui-tweaks.png").createOutputStream();check(bool(stream),"Cannot save pane screenshot");stream->setPosition(0);stream->truncate();check(juce::PNGImageFormat().writeImageToStream(editor->createComponentSnapshot(editor->getLocalBounds(),true),*stream),"Cannot encode pane screenshot");stream.reset();
     toggle->setToggleState(false,juce::dontSendNotification);toggle->onClick();check(!pane->isVisible(),"Tweak pane did not close");
     // Old embedded sources had no per-take rate and no rate/room parameters.
     ChoirProcessor legacy;legacy.loadDemo();juce::MemoryBlock old;legacy.getStateInformation(old);auto tree=juce::ValueTree::readFromData(old.getData(),old.getSize());
-    for(int i=tree.getNumChildren();--i>=0;){auto node=tree.getChild(i);if(node.hasType("TAKE"))node.removeProperty("rate",nullptr);else {const auto id=node.getProperty("id").toString();if(id=="sampleMode" || id=="outputMode" || (id.startsWith("room") && id!="room"))tree.removeChild(i,nullptr);}}
+    for(int i=tree.getNumChildren();--i>=0;){auto node=tree.getChild(i);if(node.hasType("TAKE"))node.removeProperty("rate",nullptr);else {const auto id=node.getProperty("id").toString();if(id=="sampleMode" || id=="outputMode" || id=="pitchEngine" || id=="octaveUp" || id=="octaveDown" || (id.startsWith("room") && id!="room"))tree.removeChild(i,nullptr);}}
     juce::MemoryBlock oldData;{juce::MemoryOutputStream out(oldData,false);tree.writeToStream(out);}recalled.setStateInformation(oldData.getData(),static_cast<int>(oldData.getSize()));wait([&]{return recalled.current() && !recalled.busy.load();});
-    check(recalled.takes()[0]->rate==48000 && recalled.takes()[0]->mono.size()==144000 && recalled.outputResolution()==96000 && recalled.settings().roomParameters==defaults,"Legacy state rate/default migration failed");
+    check(recalled.takes()[0]->rate==48000 && recalled.takes()[0]->mono.size()==144000 && recalled.outputResolution()==96000 && recalled.settings().roomParameters==defaults && recalled.settings().pitchEngine==choir::PitchEngine::rubberBand && recalled.settings().octaveUp==0 && recalled.settings().octaveDown==0,"Legacy state rate/default migration failed");
     roomReference(48000);roomReference(96000);file.deleteFile();
     std::cout<<"Project-rate capture/import/render/preview/export, independent 48k overrides, rate changes, mixed-rate recall, legacy migration, pane bindings and unchanged native room routing passed\n";
 } catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}

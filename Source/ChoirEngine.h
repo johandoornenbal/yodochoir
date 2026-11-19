@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "OctaveShift.h"
 namespace choir {
 constexpr int sampleRate=48000, slots=4, maxSeconds=120;
 using Waveform=std::array<float,256>;
@@ -23,6 +24,8 @@ struct Settings {
     int seed=1977;
     double sourceRate=sampleRate, outputRate=sampleRate;
     std::array<float,6> roomParameters{.5f,.5f,.25f,.5f,.75f,1.f};
+    PitchEngine pitchEngine=PitchEngine::rubberBand;
+    int octaveUp=0,octaveDown=0;
     bool operator==(const Settings& b) const;
 };
 struct Render {

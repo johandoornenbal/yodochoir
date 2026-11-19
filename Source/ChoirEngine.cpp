@@ -20,7 +20,8 @@ double read(const std::vector<float>& data,double pos) {
 bool Settings::operator==(const Settings& b) const {
     return singers==b.singers && detune==b.detune && timing==b.timing && width==b.width
         && room==b.room && outputDb==b.outputDb && seed==b.seed
-        && sourceRate==b.sourceRate && outputRate==b.outputRate && roomParameters==b.roomParameters;
+        && sourceRate==b.sourceRate && outputRate==b.outputRate && roomParameters==b.roomParameters
+        && pitchEngine==b.pitchEngine && octaveUp==b.octaveUp && octaveDown==b.octaveDown;
 }
 Waveform waveform(const std::vector<float>& data) {
     Waveform result{};
@@ -99,6 +100,17 @@ std::unique_ptr<Render> render(const std::array<std::shared_ptr<const Take>,slot
         || !std::isfinite(s.timing) || s.timing<0 || s.timing>60 || !std::isfinite(s.width) || s.width<0 || s.width>1
         || !std::isfinite(s.room) || s.room<0 || s.room>.5f || !std::isfinite(s.outputDb) || s.outputDb<-24 || s.outputDb>0)
         throw std::invalid_argument("Invalid ensemble settings");
+    if(s.octaveUp<0 || s.octaveDown<0 || s.octaveUp>s.singers || s.octaveDown>s.singers || s.octaveUp+s.octaveDown>s.singers
+        || (s.pitchEngine!=PitchEngine::rubberBand && s.pitchEngine!=PitchEngine::signalsmith))
+        throw std::invalid_argument("Octave voice counts must fit within the Singers total");
+    // Spread each octave group across the panorama, retaining the existing
+    // voice/source order and random sequence for unshifted choir renders.
+    std::vector<int> octaves(static_cast<size_t>(s.singers));
+    for(int i=0;i<s.octaveUp;++i) octaves[static_cast<size_t>((2*i+1)*s.singers/(2*s.octaveUp))]=12;
+    std::vector<size_t> remaining;
+    for(size_t i=0;i<octaves.size();++i) if(octaves[i]==0) remaining.push_back(i);
+    for(int i=0;i<s.octaveDown;++i) octaves[remaining[static_cast<size_t>((2*i+1)*static_cast<int>(remaining.size())/(2*s.octaveDown))]]=-12;
+    std::vector<std::array<std::vector<float>,2>> shifted(sources.size());
     const size_t tail=s.room>0?static_cast<size_t>(std::llround(rate*6)):0;
     const size_t count=longest+static_cast<size_t>(std::ceil(s.timing*.001*rate))+tail;
     auto result=std::make_unique<Render>(); result->settings=s;
@@ -113,7 +125,16 @@ std::unique_ptr<Render> render(const std::array<std::shared_ptr<const Take>,slot
     std::vector<double> hann(static_cast<size_t>(hop));
     for(int i=0;i<hop;++i) hann[static_cast<size_t>(i)]=.5-.5*std::cos(2*pi*i/window);
     for(int v=0;v<s.singers;++v) {
-        const auto& source=sources[static_cast<size_t>(v)%sources.size()]->mono;
+        const size_t index=static_cast<size_t>(v)%sources.size();
+        const auto* voiceSource=&sources[index]->mono;
+        const int octave=octaves[static_cast<size_t>(v)];
+        if(octave!=0) {
+            auto& cache=shifted[index][octave>0?0:1];
+            if(cache.empty()) cache=shiftOctave(*voiceSource,rate,octave,s.pitchEngine,s.seed+static_cast<int>(index)*31+(octave>0?101:211),cancel);
+            if(cache.empty()) return {};
+            voiceSource=&cache;
+        }
+        const auto& source=*voiceSource;
         const double detune=s.singers==1?0.:(rng.next()*2.-1.)*s.detune;
         const double delay=s.singers==1?0.:rng.next()*s.timing*.001*rate;
         const double pan=(s.singers==1?0.:2.*v/(s.singers-1)-1.)*s.width;

@@ -56,3 +56,39 @@ The original MIT notice is in `third_party/airwindows/LICENSE`.
 and resolves the public [Reaper API](https://www.reaper.fm/sdk/reascript/reascripthelp.html).
 No Reaper implementation or SDK library is distributed. VST3 base interfaces come
 from JUCE's bundled SDK and retain its notices.
+
+## Rubber Band Library 4.0.0
+
+Copyright 2007–2024 Particular Programs Ltd / Breakfast Quay. Vendored unchanged
+from commit `1d95888bec3ae0a17c0c4af791810d5a63f6bc35` (v4.0.0):
+https://github.com/breakfastquay/rubberband/tree/1d95888bec3ae0a17c0c4af791810d5a63f6bc35
+
+The source, public headers and upstream single-file build are in
+`third_party/rubberband`; the GPL-2.0-or-later text and notices are retained in
+`COPYING` and the source files. This build uses R3/Finer in offline mode with
+formant preservation. The upstream single-file build uses the built-in resampler
+and FFT (Accelerate FFT on Apple), without another FFT/resampler dependency.
+
+Rubber Band's GPL obligations apply to distribution of the combined plugin;
+the complete binary is not licensed solely under YodoChoir's original MIT
+licence. With the open-source JUCE route, use compatible GPLv3/AGPLv3 terms and
+comply with their source-distribution obligations. A proprietary distribution
+requires suitable commercial licences for both Rubber Band and JUCE. Original
+MIT files retain their existing notices. Rubber Band commercial licensing:
+https://breakfastquay.com/rubberband/license.html
+
+## Signalsmith Stretch and Linear
+
+Signalsmith Audio, MIT. Both implementations and licence texts are retained
+unchanged. Stretch is pinned to commit
+`88061fd4eda56a2353c5d65c74aa3f4ccf76f9da`:
+https://github.com/Signalsmith-Audio/signalsmith-stretch/tree/88061fd4eda56a2353c5d65c74aa3f4ccf76f9da
+
+Its Linear dependency is pinned to `7bb1c8f36794d6980080ce817c91f8da8fe56a66`
+(tag 0.6.6):
+https://github.com/Signalsmith-Audio/linear/tree/7bb1c8f36794d6980080ce817c91f8da8fe56a66
+
+The octave adapter enables formant compensation, uses the upstream default-quality
+preset, and compensates its input/output latency. A deterministic instance seed
+keeps repeated choir renders reproducible. No Signalsmith or Rubber Band DSP
+source is modified.

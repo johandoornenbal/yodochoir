@@ -131,6 +131,9 @@ private:
     juce::String messageText{"Load vocal takes, or try the synthetic demo."};
     juce::AudioFormatManager formats;
     std::array<std::atomic<float>*,7> values{};
+    std::atomic<float>* pitchEngine=nullptr;
+    std::atomic<float>* octaveUp=nullptr;
+    std::atomic<float>* octaveDown=nullptr;
     std::atomic<float>* sampleMode=nullptr;
     std::atomic<float>* outputMode=nullptr;
     std::array<std::atomic<float>*,6> roomValues{};

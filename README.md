@@ -208,6 +208,33 @@ capture finalizes the partial take at its previous rate. Sessions store each tak
 rate, both choices and the native room parameters. Older sessions' embedded takes
 are recognized as 48 kHz; missing new controls use their defaults.
 
+The pane also provides **Octave engine** (default **Rubber Band R3**, alternatively
+**Signalsmith**) and **Voices +12 semitones** / **Voices -12 semitones**, both
+initially zero. These counts come **out of the existing Singers total**: 12 singers
+with 2 upper and 2 lower voices means 8 original-octave, 2 upper and 2 lower voices.
+Upper plus lower must not exceed Singers; an invalid allocation is explained and
+cannot be rendered/written until corrected. All three settings are saved with
+the session. Older sessions retain zero octave voices.
+
+Both engines preserve phrase duration and compensate processing latency. Rubber
+Band uses its offline **R3/Finer** engine with formant preservation; Signalsmith
+uses its default-quality preset with formant compensation. Shifted voices are
+spread across the stereo field, receive the existing small singer variations, and
+join the normal voices **before kWoodRoom**. The Original A/B reference stays at
+the original pitch. Rendering, export and aligned track writing use the selected
+output rate as before, with the existing room tail. Zero octave counts bypass
+both pitch engines and preserve the previous choir processing.
+
+Octave processing runs on the background renderer, never the audio callback.
+Processed source/octave combinations are reused across voices during a render;
+this increases render time and temporary memory, particularly for long 96/192 kHz
+takes. Full-octave shifts can still introduce audible artifacts on difficult
+vocals; audition the two engines on your recordings. This build has synthetic
+pitch/alignment/routing tests, not a subjective listening assessment of your voice.
+
+Rubber Band is GPL-2.0-or-later (or commercially licensed); Signalsmith is MIT.
+See [THIRD_PARTY.md](THIRD_PARTY.md) for the combined-plugin distribution terms.
+
 The pane exposes all six native **kWoodRoom** parameters (0–100%): **Regen**,
 **Derez**, **Filter**, **Early reflections**, **Position**, and **Dry / Wet**.
 **RESET ROOM** restores 50%, 50%, 25%, 50%, 75%, 100%; double-clicking one dial
@@ -358,7 +385,7 @@ cmake --build build --parallel 3
 ctest --test-dir build --output-on-failure
 ```
 
-The eight suites (seven on non-Unix platforms) cover deterministic ensemble rendering, variation, stereo and
+The nine suites (eight on non-Unix platforms) cover deterministic ensemble rendering, variation, stereo and
 mono behaviour, source-rate conversion, extreme controls, headroom, cancellation,
 file import and limits, MIDI event offsets, Original/Choir preview, float/double
 host playback, export samples/format, embedded-source session recall, stale-render
@@ -413,6 +440,14 @@ track. They also check decoder cleanup and unchanged item start/length. These
 are Reaper API fixture tests; waveform appearance in an actual Reaper-on-Mac
 session still needs verification there.
 
+For v0.6, the Linux Release VST3 built and all nine suites passed.
+Octave tests check both engines at ±12 semitones and 48/96 kHz,
+exact output duration, start-latency compensation, deterministic rendering,
+cancellation and short phrases. Independent native-room processing checks that
+shifted voices enter before kWoodRoom. Zero-count bypass and singer-budget errors
+are covered, along with UI bindings, state recall and old-state defaults. Both
+engine sources are vendored and pinned so offline builds need no new downloads.
+
 The workflow tests write actual editor previews and synthetic demo WAVs
 under `build/previews`. The recording suite additionally checks stereo-pair input,
 float/double capture at multiple host rates, input monitoring, fixed eight-input
@@ -435,6 +470,7 @@ Learned choir synthesis would require a separate model/data project.
 
 ## Licenses
 
-Original renderer and wrapper/UI: MIT. JUCE is separately AGPLv3/commercial
+Original renderer and wrapper/UI: MIT. Rubber Band is GPL-2.0-or-later/commercial;
+Signalsmith Stretch/Linear are MIT. The combined plugin is not MIT-only. JUCE is separately AGPLv3/commercial
 licensed. See [THIRD_PARTY.md](THIRD_PARTY.md) for the ToTape reference and license
 requirements. This is an independent project.

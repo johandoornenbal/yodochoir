@@ -27,6 +27,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout ChoirProcessor::layout() {
     for(const auto* id:{"sampleMode","outputMode"})
         p.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID{id,1},juce::String(id)=="sampleMode"?"Sample resolution":"Output resolution",juce::StringArray{"Project","48 kHz"},0));
     for(size_t i=0;i<6;++i) p.add(std::make_unique<juce::AudioParameterFloat>(juce::ParameterID{roomIds[i],1},juce::String("kWoodRoom ")+roomNames[i],juce::NormalisableRange<float>(0,100,.1f),roomDefaults[i]));
+    p.add(std::make_unique<juce::AudioParameterChoice>(juce::ParameterID{"pitchEngine",1},"Octave pitch engine",juce::StringArray{"Rubber Band R3","Signalsmith"},0));
+    p.add(std::make_unique<juce::AudioParameterInt>(juce::ParameterID{"octaveUp",1},"Voices +12 semitones",0,32,0));
+    p.add(std::make_unique<juce::AudioParameterInt>(juce::ParameterID{"octaveDown",1},"Voices -12 semitones",0,32,0));
     return p;
 }
 ChoirProcessor::ChoirProcessor():AudioProcessor(BusesProperties().withInput("Record pairs 1-8",juce::AudioChannelSet::create7point1SDDS(),true).withOutput("Choir",juce::AudioChannelSet::stereo(),true)),
@@ -34,6 +37,7 @@ ChoirProcessor::ChoirProcessor():AudioProcessor(BusesProperties().withInput("Rec
     formats.registerBasicFormats();
     for(size_t i=0;i<ids.size();++i) values[i]=state.getRawParameterValue(ids[i]);
     original=state.getRawParameterValue("original"); loop=state.getRawParameterValue("loop"); monitor=state.getRawParameterValue("inputMonitor");
+    pitchEngine=state.getRawParameterValue("pitchEngine");octaveUp=state.getRawParameterValue("octaveUp");octaveDown=state.getRawParameterValue("octaveDown");
     sampleMode=state.getRawParameterValue("sampleMode");outputMode=state.getRawParameterValue("outputMode");
     for(size_t i=0;i<6;++i) roomValues[i]=state.getRawParameterValue(roomIds[i]);
     startThread(juce::Thread::Priority::low);startTimerHz(20);
@@ -42,6 +46,8 @@ ChoirProcessor::~ChoirProcessor() { stopTimer();armed=false;recording=false; cap
 choir::Settings ChoirProcessor::settings() const {
     choir::Settings result{juce::roundToInt(values[0]->load()),values[1]->load(),values[2]->load(),values[3]->load()*.01f,
             values[4]->load()*.01f,values[5]->load(),juce::roundToInt(values[6]->load())};
+    result.pitchEngine=static_cast<choir::PitchEngine>(juce::roundToInt(pitchEngine->load()));
+    result.octaveUp=juce::roundToInt(octaveUp->load());result.octaveDown=juce::roundToInt(octaveDown->load());
     result.sourceRate=sampleResolution();result.outputRate=outputResolution();
     for(size_t i=0;i<6;++i) result.roomParameters[i]=roomValues[i]->load()*.01f;
     return result;
@@ -94,6 +100,8 @@ void ChoirProcessor::loadDemo() {
 }
 void ChoirProcessor::requestRender() {
     if(captureActive()) { message("Finish or cancel recording before rendering the choir."); return; }
+    const auto config=settings();
+    if(config.octaveUp+config.octaveDown>config.singers) {message("Octave counts exceed Singers. Lower +12/-12 counts or increase Singers.");return;}
     const auto bank=takes(); if(std::none_of(bank.begin(),bank.end(),[](const auto& t){return bool(t);})) { message("Load at least one vocal take first."); return; }
     stop(); queuedSerial=requestSerial.fetch_add(1)+1; pending=true; message("Queued for rendering..."); notify();
 }
@@ -241,6 +249,8 @@ void ChoirProcessor::syncTransport(int frames) {
 }
 void ChoirProcessor::requestWrite() {
     if(captureActive() || writeBusy.load()) {message("Finish capture or the current write first.");return;}
+    const auto config=settings();
+    if(config.octaveUp+config.octaveDown>config.singers) {message("Octave counts exceed Singers. Lower +12/-12 counts or increase Singers.");return;}
     ReaperBridge::Context context;juce::String error;
     if(!reaper.context(context,error)) {message(error);return;}
     if((reaper.playState(context)&7)!=0) {message("Stop REAPER transport before writing the choir to the track.");return;}
@@ -481,6 +491,16 @@ public:
             dial.setDoubleClickReturnValue(true,roomDefaults[i]);dial.setTextValueSuffix(" %");
             dial.setTooltip(juce::String("Native Airwindows kWoodRoom ")+roomNames[i]+". Render again after changing; double-click restores the default.");
         }
+        addAndMakeVisible(engine);engine.setComponentID("pitchEngine");engine.addItemList({"Rubber Band R3","Signalsmith"},1);
+        engine.setColour(juce::ComboBox::backgroundColourId,style::ink);engine.setColour(juce::ComboBox::textColourId,style::gold);
+        engineAttachment=std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(processor.state,"pitchEngine",engine);
+        engine.setTooltip("Offline octave engine with vocal formant preservation. Rubber Band R3 is the default. Re-render after changing.");
+        for(size_t i=0;i<2;++i) {
+            auto& count=octaveCounts[i];addAndMakeVisible(count);const char* id=i==0?"octaveUp":"octaveDown";
+            count.setComponentID(id);count.setSliderStyle(juce::Slider::IncDecButtons);count.setTextBoxStyle(juce::Slider::TextBoxLeft,false,76,28);
+            octaveAttachments[i]=std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(processor.state,id,count);
+            count.setTooltip("Number of existing singers shifted by one octave. Upper + lower counts must fit within the main Singers total. Default: zero.");
+        }
         addAndMakeVisible(reset);reset.setComponentID("resetRoom");
         reset.onClick=[this]{for(size_t i=0;i<6;++i) {
             auto* param=processor.state.getParameter(roomIds[i]);param->beginChangeGesture();
@@ -491,7 +511,8 @@ public:
         const auto project=juce::String(processor.projectResolution()/1000.,1);
         for(auto& choice:rates) {choice.changeItemText(1,"Project ("+project+" kHz)");choice.setEnabled(!processor.captureActive() && !processor.isWriting());}
         for(auto& dial:knobs) dial.setEnabled(!processor.isWriting());
-        reset.setEnabled(!processor.isWriting());
+        reset.setEnabled(!processor.isWriting());engine.setEnabled(!processor.isWriting() && !processor.captureActive());
+        for(auto& count:octaveCounts) count.setEnabled(!processor.isWriting() && !processor.captureActive());
         repaint();
     }
     void paint(juce::Graphics& g) override {
@@ -499,24 +520,34 @@ public:
         g.setColour(style::gold);g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(1),10,1);
         g.setFont(juce::FontOptions(22.f));g.drawText("TWEAKS",30,18,900,34,juce::Justification::centredLeft);
         g.setColour(style::cream);g.setFont(juce::FontOptions(14.f));
-        g.drawText("Sample resolution",50,75,400,24,juce::Justification::centredLeft);
-        g.drawText("Output resolution",530,75,400,24,juce::Justification::centredLeft);
-        g.setFont(juce::FontOptions(12.f));
-        g.drawText("Project follows the DAW sample rate. Re-render after changing rates or room controls.",50,145,910,25,juce::Justification::centredLeft);
-        g.setColour(style::gold);g.drawText("AIRWINDOWS kWoodRoom",50,187,700,27,juce::Justification::centredLeft);
-        for(size_t i=0;i<6;++i) g.drawText(roomNames[i],40+static_cast<int>(i%3)*325,230+static_cast<int>(i/3)*150,285,25,juce::Justification::centred);
-        g.setColour(style::cream);g.drawText("Main Room blends this return with the choir. Native processing is unchanged.",50,535,920,25,juce::Justification::centredLeft);
+        g.drawText("Sample resolution",50,60,400,22,juce::Justification::centredLeft);
+        g.drawText("Output resolution",530,60,400,22,juce::Justification::centredLeft);
+        g.drawText("Octave engine",50,126,300,24,juce::Justification::centredLeft);
+        g.drawText("Voices +12 semitones",390,126,250,24,juce::Justification::centredLeft);
+        g.drawText("Voices -12 semitones",700,126,250,24,juce::Justification::centredLeft);
+        g.setFont(juce::FontOptions(12.f));const auto config=processor.settings();
+        const int normal=config.singers-config.octaveUp-config.octaveDown;
+        g.setColour(normal<0?juce::Colour(0xffe89a80):style::cream);
+        g.drawText(normal<0?"Counts exceed Singers. Lower octave counts or increase Singers on the main panel.":juce::String(normal)+" original + "+juce::String(config.octaveUp)+" upper + "+juce::String(config.octaveDown)+" lower = "+juce::String(config.singers)+" singers. Re-render to hear changes.",50,183,900,22,juce::Justification::centredLeft);
+        g.setColour(style::gold);g.drawText("AIRWINDOWS kWoodRoom",50,208,700,27,juce::Justification::centredLeft);
+        for(size_t i=0;i<6;++i) g.drawText(roomNames[i],40+static_cast<int>(i%3)*325,235+static_cast<int>(i/3)*145,285,22,juce::Justification::centred);
+        g.setColour(style::cream);g.drawText("Main Room blends this return with the choir. Octave voices are mixed before the room.",50,535,920,25,juce::Justification::centredLeft);
     }
     void resized() override {
-        rates[0].setBounds(50,105,420,30);rates[1].setBounds(530,105,420,30);
-        reset.setBounds(770,185,180,28);
-        for(size_t i=0;i<6;++i) knobs[i].setBounds(80+static_cast<int>(i%3)*325,255+static_cast<int>(i/3)*150,205,120);
+        rates[0].setBounds(50,84,420,28);rates[1].setBounds(530,84,420,28);
+        engine.setBounds(50,152,300,28);octaveCounts[0].setBounds(390,152,250,28);octaveCounts[1].setBounds(700,152,250,28);
+        reset.setBounds(770,208,180,28);
+        for(size_t i=0;i<6;++i) knobs[i].setBounds(80+static_cast<int>(i%3)*325,257+static_cast<int>(i/3)*145,205,108);
     }
 private:
     ChoirProcessor& processor;
     std::array<juce::ComboBox,2> rates;
     std::array<juce::Slider,6> knobs;
     juce::TextButton reset{"RESET ROOM"};
+    juce::ComboBox engine;
+    std::array<juce::Slider,2> octaveCounts;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> engineAttachment;
+    std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>,2> octaveAttachments;
     std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>,6> attachments;
     std::array<std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>,2> rateAttachments;
 };
@@ -609,7 +640,7 @@ public:
         refresh();
     }
     void resized() override {
-        brandLogo.setBounds(30,12,260,84);
+        brandLogo.setBounds(22,12,260,84);
         tweakButton.setBounds(700,56,145,29);tweaks.setBounds(40,115,1014,565);
         sizeChoice.setBounds(864,15,190,27); reset.setBounds(864,56,190,29);
         demoButton.setBounds(446,128,119,26); cancelCaptureButton.setBounds(323,128,115,26); recordAllButton.setBounds(205,128,110,26); monitorButton.setBounds(602,320,190,26);
@@ -709,7 +740,9 @@ private:
         renderButton.setButtonText(working?"Cancel render":"RENDER CHOIR");
         ab.setButtonText(ab.getToggleState()?"A: Original take":"B: Choir");
         const auto r=processor.rendered();
-        const auto text=processor.status();
+        auto text=processor.status();const auto config=processor.settings();
+        if(text.startsWith("Octave counts exceed") && config.octaveUp+config.octaveDown<=config.singers)
+            text=ready?"Choir ready. Preview it or write to track.":"Octave allocation updated. Render choir to hear changes.";
         statusLabel.setText(writing?"Writing phase: render, save WAV, prepare waveform and place the aligned item.":capturing?(processor.isArmed()?"Armed. Use REAPER Play to start; transport Stop ends capture.":processor.isRecording()?"Recording routed input. Press STOP to keep it, or Cancel capture to keep the previous take.":"Preparing the recorded take..."):!working && r && !ready && text.startsWith("Choir ready")?"Takes or settings changed. Render choir again before preview or export.":text,juce::dontSendNotification);
         if(sizeChoice.getSelectedId()!=processor.uiSize.load()) {sizeChoice.setSelectedId(processor.uiSize.load(),juce::dontSendNotification);if(sizeChanged)sizeChanged();}
     }
